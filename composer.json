@@ -3,7 +3,7 @@
   "description": "A lightweight and versatile PHP database class that supports both MySQL and SQLite, providing an easy-to-use interface for common database operations such as `SELECT`, `INSERT`, `UPDATE`, and `DELETE`.",
   "type": "library",
   "require": {
-    "php": ">=7.4"
+    "php": ">=8.0"
   },
   "autoload": {
     "psr-4": {
