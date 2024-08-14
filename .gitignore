@@ -1,0 +1,39 @@
+# Ignore sensitive information and environment files
+.env
+*.env
+
+# Ignore composer dependencies
+/vendor/
+
+# Ignore operating system files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE and editor configuration files
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# Ignore log files
+*.log
+
+# Ignore cache files
+/cache/
+/storage/
+
+# Ignore SQLite database files (if used for local development)
+*.sqlite
+*.sqlite3
+
+# Ignore composer lock file (optional, if you don't want to track it)
+composer.lock
+
+# Ignore node_modules (if using Node.js in your project)
+node_modules/
+
+# Ignore npm debug log
+npm-debug.log
+yarn-error.log
+
+/.idea
