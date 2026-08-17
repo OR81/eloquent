@@ -1013,11 +1013,23 @@ NDB::statement('alter table users add column age integer');
 NDB::unprepared('create table t (id integer)');       // DDL, no bindings
 ```
 
-Use `NDB::raw()` for a fragment that must not be quoted or bound. Never build one from user input:
+Use `NDB::raw()` for a fragment that must not be quoted. Never build one from user input:
 
 ```php
 NDB::table('users')->select(NDB::raw('count(*) as total'))->first();
 ```
+
+Values still belong in bindings. Put a `?` where each one goes and pass them in the same order, and the fragment stays safe wherever it is used — in a select, a where, a having, an insert or an update:
+
+```php
+NDB::table('users')->update([
+    'nickname' => NDB::raw('coalesce(nullif(trim(nickname), \'\'), ?, nickname)', [$nickname]),
+]);
+// update "users" set "nickname" = coalesce(nullif(trim(nickname), ''), ?, nickname)
+// bindings: [$nickname]
+```
+
+This is the fill-in-the-blanks update: write the incoming value only where the column is currently empty, and leave it alone otherwise. See [the worked example](#filling-in-only-the-blank-columns).
 
 ## Debugging
 
@@ -1269,6 +1281,62 @@ NDB::table('daily_totals')->upsert(
 );
 ```
 
+### Filling in only the blank columns
+
+A partial record arrives and should top up whatever is still missing, without overwriting anything already there. One statement, one round trip, every value bound:
+
+```php
+$blank = fn ($value) => $value === null || trim((string) $value) === '';
+
+NDB::table('vadana')
+    ->where('national_code', $studentId)
+    ->update([
+        'city' => NDB::raw(
+            "coalesce(nullif(trim(city), ''), ?, city)",
+            [$blank($city) ? null : $city]
+        ),
+        'code' => NDB::raw(
+            "coalesce(nullif(trim(code), ''), ?, code)",
+            [$blank($code) ? null : $code]
+        ),
+        // an empty array and the literal string "null" count as blank too
+        'lessons' => NDB::raw(
+            "coalesce(nullif(nullif(nullif(trim(lessons), ''), '[]'), 'null'), ?, lessons)",
+            [$blank($lessonsJson) ? null : $lessonsJson]
+        ),
+    ]);
+```
+
+`coalesce` walks left to right: the stored value wins if it is not blank, the incoming value fills the gap, and the trailing column name keeps the row unchanged when neither has anything. The column names are literals you wrote, so nothing here comes from user input.
+
+If you would rather not write SQL, the same thing as three guarded updates:
+
+```php
+function fillColumn(string $studentId, string $column, ?string $value, array $alsoBlank = []): int
+{
+    if ($value === null || trim($value) === '') {
+        return 0;
+    }
+
+    return NDB::table('vadana')
+        ->where('national_code', $studentId)
+        ->where(function (Builder $query) use ($column, $alsoBlank) {
+            $query->whereNull($column)->orWhereRaw("trim({$column}) = ''");
+
+            foreach ($alsoBlank as $blank) {
+                $query->orWhereRaw("trim({$column}) = ?", [$blank]);
+            }
+        })
+        ->update([$column => $value]);
+}
+
+fillColumn($studentId, 'city', $city);
+fillColumn($studentId, 'code', $code);
+fillColumn($studentId, 'lessons', $lessonsJson, ['[]', 'null']);
+```
+
+Three round trips instead of one, but each condition is spelled out and the return value tells you which columns were actually filled.
+
 ### Walking a large table
 
 ```php
@@ -1300,10 +1368,11 @@ jalali_calendar_test        97 passed    0 failed
 jalali_query_test          122 passed    0 failed
 model_api_test              72 passed    0 failed
 model_test                 160 passed    0 failed
+raw_bindings_test           32 passed    0 failed
 row_test                   115 passed    0 failed
 where_variants_test         47 passed    0 failed
 ----------------------------------------------------------
-total                     1031 passed    0 failed
+total                     1063 passed    0 failed
 ```
 
 Every public method of every class is exercised.
@@ -1341,6 +1410,7 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `model_test` | casts, mass assignment, timestamps, soft deletes, scopes, relations |
 | `model_api_test` | the model examples in this file |
 | `row_test` | results as objects, and the create/find helpers on both builders |
+| `raw_bindings_test` | raw fragments carrying bindings, and the fill-in-the-blanks update |
 | `examples_test` | the worked examples in this file |
 
 ## Classes

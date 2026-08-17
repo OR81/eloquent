@@ -128,6 +128,10 @@ class Builder
                 $this->selectSub($column, $as);
             } else {
                 $this->columns[] = $column;
+
+                if ($column instanceof Expression && $column->hasBindings()) {
+                    $this->addBinding($column->getBindings(), 'select');
+                }
             }
         }
 
@@ -146,6 +150,10 @@ class Builder
                 $this->selectSub($column, $as);
             } else {
                 $this->columns[] = $column;
+
+                if ($column instanceof Expression && $column->hasBindings()) {
+                    $this->addBinding($column->getBindings(), 'select');
+                }
             }
         }
 
@@ -331,9 +339,7 @@ class Builder
 
         $this->wheres[] = compact('type', 'column', 'operator', 'value', 'boolean');
 
-        if (! $value instanceof Expression) {
-            $this->addBinding($value, 'where');
-        }
+        $this->addValueBinding($value, 'where');
 
         return $this;
     }
@@ -398,9 +404,7 @@ class Builder
         $this->wheres[] = compact('type', 'column', 'values', 'boolean');
 
         foreach ($values as $value) {
-            if (! $value instanceof Expression) {
-                $this->addBinding($value, 'where');
-            }
+            $this->addValueBinding($value, 'where');
         }
 
         return $this;
@@ -462,9 +466,7 @@ class Builder
         $this->wheres[] = compact('type', 'column', 'values', 'boolean', 'not');
 
         foreach ($values as $value) {
-            if (! $value instanceof Expression) {
-                $this->addBinding($value, 'where');
-            }
+            $this->addValueBinding($value, 'where');
         }
 
         return $this;
@@ -661,9 +663,7 @@ class Builder
 
         $this->wheres[] = compact('type', 'column', 'operator', 'value', 'boolean');
 
-        if (! $value instanceof Expression) {
-            $this->addBinding((string) $value, 'where');
-        }
+        $this->addValueBinding($value instanceof Expression ? $value : (string) $value, 'where');
 
         return $this;
     }
@@ -1041,9 +1041,7 @@ class Builder
 
         $this->havings[] = compact('type', 'column', 'operator', 'value', 'boolean');
 
-        if (! $value instanceof Expression) {
-            $this->addBinding($value, 'having');
-        }
+        $this->addValueBinding($value, 'having');
 
         return $this;
     }
@@ -1074,9 +1072,7 @@ class Builder
         $this->havings[] = compact('type', 'column', 'values', 'boolean', 'not');
 
         foreach ($values as $value) {
-            if (! $value instanceof Expression) {
-                $this->addBinding($value, 'having');
-            }
+            $this->addValueBinding($value, 'having');
         }
 
         return $this;
@@ -2014,6 +2010,19 @@ class Builder
         return $this->bindings;
     }
 
+    /**
+     * Register the bindings a value needs: its own if it is a raw fragment,
+     * otherwise the value itself.
+     */
+    protected function addValueBinding($value, string $type = 'where'): self
+    {
+        if ($value instanceof Expression) {
+            return $value->hasBindings() ? $this->addBinding($value->getBindings(), $type) : $this;
+        }
+
+        return $this->addBinding($value, $type);
+    }
+
     public function addBinding($value, string $type = 'where'): self
     {
         if (! array_key_exists($type, $this->bindings)) {
@@ -2181,7 +2190,11 @@ class Builder
 
         foreach ($rows as $record) {
             foreach ($record as $value) {
-                if (! $value instanceof Expression) {
+                if ($value instanceof Expression) {
+                    foreach ($value->getBindings() as $binding) {
+                        $bindings[] = $binding;
+                    }
+                } else {
                     $bindings[] = $value;
                 }
             }

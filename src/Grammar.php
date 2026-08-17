@@ -657,7 +657,11 @@ class Grammar
         $valueBindings = [];
 
         foreach ($values as $value) {
-            if (! $value instanceof Expression) {
+            if ($value instanceof Expression) {
+                foreach ($value->getBindings() as $binding) {
+                    $valueBindings[] = $binding;
+                }
+            } else {
                 $valueBindings[] = $value;
             }
         }

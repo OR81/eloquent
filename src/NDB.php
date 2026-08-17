@@ -251,9 +251,15 @@ class NDB
         return new Builder($connection, $connection->getGrammar());
     }
 
-    public static function raw(string $value): Expression
+    /**
+     * A raw SQL fragment. Values still belong in bindings: put a ? where each
+     * one goes and pass them in the same order.
+     *
+     *     NDB::raw("COALESCE(NULLIF(TRIM(city), ''), ?, city)", [$city])
+     */
+    public static function raw(string $value, array $bindings = []): Expression
     {
-        return new Expression($value);
+        return new Expression($value, $bindings);
     }
 
     /* ------------------------------------------------------------------
