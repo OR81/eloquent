@@ -124,6 +124,9 @@ abstract class Model implements ArrayAccess, JsonSerializable
     /** What they were when the row was loaded or last saved. */
     protected array $original = [];
 
+    /** What the last save() wrote. */
+    protected array $changes = [];
+
     /** Whether this instance corresponds to a row that is already stored. */
     public bool $exists = false;
 
@@ -297,8 +300,81 @@ abstract class Model implements ArrayAccess, JsonSerializable
     public function syncOriginal(): self
     {
         $this->original = $this->attributes;
+        $this->changes = [];
 
         return $this;
+    }
+
+    /**
+     * What the last save() actually wrote.
+     */
+    public function getChanges(): array
+    {
+        return $this->changes;
+    }
+
+    /**
+     * Whether the last save() wrote anything, or a given column.
+     */
+    public function wasChanged(?string $key = null): bool
+    {
+        return $key === null ? $this->changes !== [] : array_key_exists($key, $this->changes);
+    }
+
+    /**
+     * A subset of the model's values, cast as usual.
+     */
+    public function only(array $keys): array
+    {
+        $output = [];
+
+        foreach ($keys as $key) {
+            $output[$key] = $this->getAttribute($key);
+        }
+
+        return $output;
+    }
+
+    /**
+     * Everything but the given columns.
+     */
+    public function except(array $keys): array
+    {
+        return array_diff_key($this->toArray(), array_flip($keys));
+    }
+
+    /**
+     * Whether this is the same row as another model.
+     */
+    public function is(?self $other): bool
+    {
+        return $other !== null
+            && static::class === get_class($other)
+            && $this->getKey() !== null
+            && $this->getKey() === $other->getKey()
+            && $this->getTable() === $other->getTable();
+    }
+
+    public function isNot(?self $other): bool
+    {
+        return ! $this->is($other);
+    }
+
+    /**
+     * An unsaved copy, without the key or the timestamps.
+     */
+    public function replicate(array $except = []): self
+    {
+        $skip = array_merge(
+            [$this->primaryKey, $this->getCreatedAtColumn(), $this->getUpdatedAtColumn(), $this->getDeletedAtColumn()],
+            $except
+        );
+
+        $copy = new static();
+
+        $copy->attributes = array_diff_key($this->attributes, array_flip($skip));
+
+        return $copy;
     }
 
     public function hasCast(string $key): bool
@@ -681,6 +757,8 @@ abstract class Model implements ArrayAccess, JsonSerializable
 
     public function save(): bool
     {
+        $this->changes = [];
+
         $query = $this->newQueryWithoutScopes();
 
         if ($this->exists) {
@@ -695,6 +773,7 @@ abstract class Model implements ArrayAccess, JsonSerializable
             $query->where($this->primaryKey, '=', $this->getKeyForQuery())->update($dirty);
 
             $this->syncOriginal();
+            $this->changes = $dirty;
 
             return true;
         }
@@ -717,9 +796,55 @@ abstract class Model implements ArrayAccess, JsonSerializable
         }
 
         $this->exists = true;
+
+        $inserted = $this->attributes;
+
         $this->syncOriginal();
+        $this->changes = $inserted;
 
         return true;
+    }
+
+    /**
+     * Bump updated_at without changing anything else.
+     */
+    public function touch(): bool
+    {
+        if (! $this->exists || ! $this->timestamps) {
+            return false;
+        }
+
+        $column = $this->getUpdatedAtColumn();
+
+        $this->attributes[$column] = $this->freshTimestampFor($column);
+
+        return $this->save();
+    }
+
+    /**
+     * Delete rows by key, without loading them first.
+     *
+     * @param mixed ...$ids one key, several keys, or an array of them
+     * @return int the number of rows deleted
+     */
+    public static function destroy(...$ids): int
+    {
+        $ids = count($ids) === 1 && is_array($ids[0]) ? $ids[0] : $ids;
+
+        if ($ids === []) {
+            return 0;
+        }
+
+        $instance = new static();
+        $deleted = 0;
+
+        foreach ($instance->newQuery()->whereIn($instance->getKeyName(), $ids)->get() as $model) {
+            if ($model->delete()) {
+                $deleted++;
+            }
+        }
+
+        return $deleted;
     }
 
     /**

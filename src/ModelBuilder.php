@@ -24,6 +24,8 @@ class ModelBuilder extends Builder
     {
         $this->model = $model;
 
+        $this->keyName($model->getKeyName());
+
         return $this;
     }
 
@@ -37,25 +39,19 @@ class ModelBuilder extends Builder
      | ------------------------------------------------------------------ */
 
     /**
+     * @return Model|array
+     */
+    protected function hydrateRow(array $row)
+    {
+        return $this->hydrate ? $this->model->newFromBuilder($row) : $row;
+    }
+
+    /**
      * @return Model[]
      */
     public function get(array $columns = ['*']): array
     {
-        $rows = $this->runSelect($columns);
-
-        if (! $this->hydrate) {
-            return $rows;
-        }
-
-        return array_map(fn (array $row) => $this->model->newFromBuilder($row), $rows);
-    }
-
-    /**
-     * The plain arrays, with no model in the way.
-     */
-    public function toBase(array $columns = ['*']): array
-    {
-        return $this->runSelect($columns);
+        return parent::get($columns);
     }
 
     /**
@@ -63,9 +59,7 @@ class ModelBuilder extends Builder
      */
     public function cursor(array $columns = ['*']): Generator
     {
-        foreach (parent::cursor($columns) as $row) {
-            yield $this->hydrate ? $this->model->newFromBuilder($row) : $row;
-        }
+        return parent::cursor($columns);
     }
 
     /**
@@ -103,15 +97,45 @@ class ModelBuilder extends Builder
     /**
      * @return Model
      */
-    public function findOrFail($id, array $columns = ['*'])
+    public function findOrFail($id, array $columns = ['*'], ?string $column = null)
     {
-        $result = $this->find($id, $columns);
+        $result = $this->find($id, $columns, $column);
 
         if ($result === null) {
             throw new ModelNotFoundException(get_class($this->model), $id);
         }
 
         return $result;
+    }
+
+    /**
+     * Exactly one model must match.
+     *
+     * @return Model
+     */
+    public function sole(array $columns = ['*'])
+    {
+        $results = $this->limit(2)->get($columns);
+
+        if ($results === []) {
+            throw new ModelNotFoundException(get_class($this->model));
+        }
+
+        if (count($results) > 1) {
+            throw new RuntimeException(
+                'More than one record matched the query on [' . get_class($this->model) . '], but exactly one was expected.'
+            );
+        }
+
+        return $results[0];
+    }
+
+    /**
+     * @return Model|null
+     */
+    public function firstWhere($column, $operator = null, $value = null, string $boolean = 'and')
+    {
+        return $this->where(...func_get_args())->first();
     }
 
     /**
@@ -128,14 +152,34 @@ class ModelBuilder extends Builder
 
     /**
      * Fill a new model, save it, and hand it back.
+     *
+     * @return Model
      */
-    public function create(array $attributes = []): Model
+    public function create(array $attributes = [])
     {
         $model = $this->model->newInstance($attributes);
 
         $model->save();
 
         return $model;
+    }
+
+    /**
+     * Save several models in one transaction.
+     *
+     * @return Model[]
+     */
+    public function createMany(array $rows): array
+    {
+        return $this->getConnection()->transaction(function () use ($rows) {
+            $created = [];
+
+            foreach ($rows as $attributes) {
+                $created[] = $this->create($attributes);
+            }
+
+            return $created;
+        });
     }
 
     /**
@@ -157,14 +201,20 @@ class ModelBuilder extends Builder
         return $existing ?? $this->model->newInstance(array_merge($attributes, $values));
     }
 
-    public function firstOrCreate(array $attributes, array $values = []): Model
+    /**
+     * @return Model
+     */
+    public function firstOrCreate(array $attributes, array $values = [])
     {
         $existing = (clone $this)->where($attributes)->first();
 
         return $existing ?? $this->create(array_merge($attributes, $values));
     }
 
-    public function updateOrCreate(array $attributes, array $values = []): Model
+    /**
+     * @return Model
+     */
+    public function updateOrCreate(array $attributes, array $values = [])
     {
         $model = $this->firstOrNew($attributes, $values);
 
@@ -175,6 +225,16 @@ class ModelBuilder extends Builder
         $model->save();
 
         return $model;
+    }
+
+    /**
+     * The same thing, under the name people reach for first.
+     *
+     * @return Model
+     */
+    public function createOrUpdate(array $attributes, array $values = [])
+    {
+        return $this->updateOrCreate($attributes, $values);
     }
 
     /**

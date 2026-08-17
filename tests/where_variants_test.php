@@ -141,7 +141,7 @@ check('orHaving',
     ['admin', 'user']);
 
 check('havingNull',
-    users()->select('manager_id')->groupBy('manager_id')->havingNull('manager_id')->get(),
+    users()->select('manager_id')->groupBy('manager_id')->havingNull('manager_id')->toBase(),
     [['manager_id' => null]]);
 
 check('havingNull compiles',
@@ -151,21 +151,21 @@ check('havingNull compiles',
 section('select and join extras');
 
 check('addSelect appends without clearing',
-    users()->select('id')->addSelect('name')->orderBy('id')->first(),
+    plain(users()->select('id')->addSelect('name')->orderBy('id')->first()),
     ['id' => 1, 'name' => 'Alice']);
 
 check('addSelect accepts a list',
-    users()->select('id')->addSelect(['name', 'role'])->orderBy('id')->first(),
+    plain(users()->select('id')->addSelect(['name', 'role'])->orderBy('id')->first()),
     ['id' => 1, 'name' => 'Alice', 'role' => 'admin']);
 
 check('leftJoinSub',
-    users()->leftJoinSub(
+    plain(users()->leftJoinSub(
         NDB::table('posts')->select('user_id')->selectRaw('count(*) as total')->groupBy('user_id'),
         'stats',
         'users.id',
         '=',
         'stats.user_id'
-    )->orderBy('users.id')->select('users.name', 'stats.total')->get(),
+    )->orderBy('users.id')->select('users.name', 'stats.total')->get()),
     [
         ['name' => 'Alice', 'total' => 1],
         ['name' => 'Bob', 'total' => 1],

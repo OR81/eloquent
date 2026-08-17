@@ -144,10 +144,10 @@ $daily = NDB::table('orders')
 
 $byMonth = [];
 foreach ($daily as $row) {
-    $month = Jalali::fromGregorian($row['day'])->format('Y/m');
+    $month = Jalali::fromGregorian($row->day)->format('Y/m');
 
-    $byMonth[$month]['total'] = ($byMonth[$month]['total'] ?? 0) + $row['total'];
-    $byMonth[$month]['orders'] = ($byMonth[$month]['orders'] ?? 0) + $row['orders'];
+    $byMonth[$month]['total'] = ($byMonth[$month]['total'] ?? 0) + $row->total;
+    $byMonth[$month]['orders'] = ($byMonth[$month]['orders'] ?? 0) + $row->orders;
 }
 ksort($byMonth);
 
@@ -171,7 +171,7 @@ $top = NDB::table('customers', 'c')
     ->limit(2)
     ->get();
 
-check('top customers by revenue', $top, [
+check('top customers by revenue', plain($top), [
     ['name' => 'زهرا موسوی', 'revenue' => 825000],
     ['name' => 'مریم احمدی', 'revenue' => 640000],
 ]);
@@ -261,7 +261,7 @@ $query = NDB::table('orders')
     ->orderBy('orders.id');
 
 foreach ($query->cursor() as $row) {
-    $lines[] = "{$row['code']},{$row['name']},{$row['created_at']},{$row['total']}";
+    $lines[] = "{$row->code},{$row->name},{$row->created_at},{$row->total}";
 }
 
 check('the first exported line', $lines[0], 'ORD-1001,علی رضایی,1403/05/26,250000');
@@ -293,7 +293,42 @@ check('upsert a daily rollup row',
     })(),
     ['1403/05/26' => 250, '1403/05/27' => 90]);
 
-section('10. chunking through a large table');
+section('10. the search box, across several columns');
+
+check('whereAny is the search-box case',
+    NDB::table('customers')->whereAny(['name', 'phone', 'city'], 'like', '%1110000%')->pluck('name'),
+    ['علی رضایی']);
+
+check('the term can just as well hit the name',
+    NDB::table('customers')->whereAny(['name', 'phone', 'city'], 'like', '%مریم%')->pluck('name'),
+    ['مریم احمدی']);
+
+check('or the city',
+    NDB::table('customers')->whereAny(['name', 'phone', 'city'], 'like', '%شیراز%')->pluck('name'),
+    ['زهرا موسوی']);
+
+check('and it stays in its own group',
+    NDB::table('customers')
+        ->where('is_active', 1)
+        ->whereAny(['name', 'city'], 'like', '%تهران%')
+        ->pluck('name'),
+    ['علی رضایی']);
+
+section('11. create() hands back the stored row');
+
+$customer = NDB::table('customers')->create(['name' => 'سارا نجفی', 'city' => 'تبریز']);
+
+check('the key is filled in', is_int($customer->id) && $customer->id > 0, true);
+check('and the column defaults the database applied', $customer->is_active, 1);
+
+check('firstOrCreate finds the one just made',
+    NDB::table('customers')->firstOrCreate(['name' => 'سارا نجفی'])->id, $customer->id);
+
+check('updateOrCreate returns the updated row',
+    NDB::table('customers')->updateOrCreate(['name' => 'سارا نجفی'], ['city' => 'ارومیه'])->city,
+    'ارومیه');
+
+section('12. chunking through a large table');
 
 $seen = 0;
 NDB::table('orders')->orderBy('id')->chunk(3, function (array $rows) use (&$seen) {

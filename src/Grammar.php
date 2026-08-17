@@ -495,6 +495,20 @@ class Grammar
         return "{$verb} into {$table} ({$columns}) values {$parameters}";
     }
 
+    /**
+     * insert into t (cols) select ...
+     */
+    public function compileInsertUsing(Builder $query, array $columns, string $select): string
+    {
+        $table = $this->wrapTable($query->from);
+
+        if ($columns === []) {
+            return "insert into {$table} {$select}";
+        }
+
+        return "insert into {$table} (" . $this->columnize($columns) . ") {$select}";
+    }
+
     public function compileUpsert(Builder $query, array $values, array $uniqueBy, array $update): string
     {
         $sql = $this->compileInsert($query, $values);

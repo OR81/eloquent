@@ -400,12 +400,12 @@ check('whereExists at runtime',
 section('runtime: joins & grouping');
 
 check('join returns joined columns',
-    NDB::table('users')
+    plain(NDB::table('users')
         ->join('posts', 'users.id', '=', 'posts.user_id')
         ->where('posts.published', 1)
         ->orderBy('posts.id')
         ->select('users.name', 'posts.title')
-        ->get(),
+        ->get()),
     [
         ['name' => 'Alice', 'title' => 'Hello'],
         ['name' => 'Bob', 'title' => 'Bob post'],
@@ -421,7 +421,7 @@ check('group by + having',
         ->selectRaw('count(*) as total')
         ->groupBy('user_id')
         ->having('total', '>', 1)
-        ->get(),
+        ->toBase(),
     [['user_id' => 1, 'total' => 2]]);
 
 section('runtime: ordering & pagination');

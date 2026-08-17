@@ -133,6 +133,20 @@ check('the ignore modifier, mysql',
     $mysqlGrammar->compileInsert(sqliteQuery($mysql), [['name' => 'A']], 'ignore'),
     'insert ignore into `users` (`name`) values (?)');
 
+section('compileInsertUsing');
+
+check('with a column list',
+    $sqliteGrammar->compileInsertUsing(sqliteQuery($sqlite), ['name', 'votes'], 'select "name", "votes" from "old_users"'),
+    'insert into "users" ("name", "votes") select "name", "votes" from "old_users"');
+
+check('without one',
+    $sqliteGrammar->compileInsertUsing(sqliteQuery($sqlite), [], 'select * from "old_users"'),
+    'insert into "users" select * from "old_users"');
+
+check('mysql wraps its identifiers the same way',
+    $mysqlGrammar->compileInsertUsing(sqliteQuery($mysql), ['name'], 'select `name` from `old_users`'),
+    'insert into `users` (`name`) select `name` from `old_users`');
+
 section('compileUpsert');
 
 check('sqlite uses on conflict / excluded',

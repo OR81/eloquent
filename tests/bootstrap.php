@@ -32,6 +32,23 @@ $pass = 0;
 $fail = 0;
 
 /**
+ * The plain arrays behind a Row, a Model, or a list of either, so results can
+ * be compared against literals.
+ */
+function plain($value)
+{
+    if (is_array($value)) {
+        return array_map('plain', $value);
+    }
+
+    if ($value instanceof Or81\Eloquent\Row || $value instanceof Or81\Eloquent\Model) {
+        return $value->toArray();
+    }
+
+    return $value;
+}
+
+/**
  * Assert that a value is exactly what it should be.
  */
 function check(string $label, $actual, $expected): void

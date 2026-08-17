@@ -253,8 +253,8 @@ check('cast a unix column',
     'جمعه 26 مرداد 1403');
 
 check('casting leaves other columns alone',
-    NDB::table('orders')->castJalali('g_date', 'Y/m/d')->whereJalaliDate('g_date', '1403/05/26')
-        ->first(['title', 'g_date']),
+    plain(NDB::table('orders')->castJalali('g_date', 'Y/m/d')->whereJalaliDate('g_date', '1403/05/26')
+        ->first(['title', 'g_date'])),
     ['title' => '1403/05/26', 'g_date' => '1403/05/26']);
 
 check('casts apply to cursor() too',

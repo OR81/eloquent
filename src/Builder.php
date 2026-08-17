@@ -74,6 +74,9 @@ class Builder
     /** Columns to convert to Jalali on the way out: column => output format. */
     protected array $jalaliCasts = [];
 
+    /** The primary key column, used by find(), create() and delete($id). */
+    protected string $keyName = 'id';
+
     /** Storage detected by probing a table, keyed by connection|table|column. */
     protected static array $detectedStorage = [];
 
@@ -513,6 +516,61 @@ class Builder
     public function whereNotLike(string $column, string $value, string $boolean = 'and'): self
     {
         return $this->whereLike($column, $value, $boolean, true);
+    }
+
+    /**
+     * The same condition across several columns, any of which may match. The
+     * whole thing is one group, so it cannot leak into the clauses around it.
+     *
+     *     ->whereAny(['name', 'email', 'phone'], 'like', "%{$term}%")
+     */
+    public function whereAny(array $columns, $operator = null, $value = null, string $boolean = 'and'): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        return $this->whereNested(function (Builder $query) use ($columns, $operator, $value) {
+            foreach ($columns as $column) {
+                $query->where($column, $operator, $value, 'or');
+            }
+        }, $boolean);
+    }
+
+    public function orWhereAny(array $columns, $operator = null, $value = null): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        return $this->whereAny($columns, $operator, $value, 'or');
+    }
+
+    /**
+     * The same condition across several columns, all of which must match.
+     */
+    public function whereAll(array $columns, $operator = null, $value = null, string $boolean = 'and'): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        return $this->whereNested(function (Builder $query) use ($columns, $operator, $value) {
+            foreach ($columns as $column) {
+                $query->where($column, $operator, $value, 'and');
+            }
+        }, $boolean);
+    }
+
+    public function orWhereAll(array $columns, $operator = null, $value = null): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        return $this->whereAll($columns, $operator, $value, 'or');
+    }
+
+    /**
+     * The same condition across several columns, none of which may match.
+     */
+    public function whereNone(array $columns, $operator = null, $value = null, string $boolean = 'and'): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        return $this->whereAny($columns, $operator, $value, $boolean . ' not');
     }
 
     public function whereNested(Closure $callback, string $boolean = 'and'): self
@@ -1229,11 +1287,40 @@ class Builder
         return $this->jalaliCasts === [] ? $rows : array_map([$this, 'applyJalaliCasts'], $rows);
     }
 
+    /**
+     * Turn one raw row into whatever this builder hands out. Overridden by
+     * ModelBuilder so a model comes back instead.
+     *
+     * @return Row
+     */
+    protected function hydrateRow(array $row)
+    {
+        return new Row($row);
+    }
+
+    /**
+     * Rows come back as Row objects, so columns are read as properties.
+     *
+     * @return Row[]
+     */
     public function get(array $columns = ['*']): array
+    {
+        return array_map([$this, 'hydrateRow'], $this->runSelect($columns));
+    }
+
+    /**
+     * The same rows as plain associative arrays.
+     *
+     * @return array[]
+     */
+    public function toBase(array $columns = ['*']): array
     {
         return $this->runSelect($columns);
     }
 
+    /**
+     * @return Generator<Row>
+     */
     public function cursor(array $columns = ['*']): Generator
     {
         $rows = $this->onceWithColumns($columns, function () {
@@ -1241,12 +1328,12 @@ class Builder
         });
 
         foreach ($rows as $row) {
-            yield $this->jalaliCasts === [] ? $row : $this->applyJalaliCasts($row);
+            yield $this->hydrateRow($this->jalaliCasts === [] ? $row : $this->applyJalaliCasts($row));
         }
     }
 
     /**
-     * @return array|null the first matching row, or null
+     * @return Row|null the first matching row, or null
      */
     public function first(array $columns = ['*'])
     {
@@ -1256,25 +1343,116 @@ class Builder
     }
 
     /**
-     * @return array the first matching row
+     * @return Row the first matching row
      */
     public function firstOrFail(array $columns = ['*'])
     {
         $result = $this->first($columns);
 
         if ($result === null) {
-            throw new RuntimeException('No records found for the given query.');
+            throw new RecordNotFoundException($this->describeTable());
         }
 
         return $result;
     }
 
     /**
-     * @return array|null the matching row, or null
+     * The first matching row, or whatever the callback returns.
+     *
+     * @return Row|mixed
+     */
+    public function firstOr(callable $callback, array $columns = ['*'])
+    {
+        $result = $this->first($columns);
+
+        return $result ?? $callback($this);
+    }
+
+    /**
+     * The first row matching a single condition.
+     *
+     * @return Row|null
+     */
+    public function firstWhere($column, $operator = null, $value = null, string $boolean = 'and')
+    {
+        return $this->where(...func_get_args())->first();
+    }
+
+    /**
+     * Exactly one row must match, or it is an error either way.
+     *
+     * @return Row
+     */
+    public function sole(array $columns = ['*'])
+    {
+        $results = $this->limit(2)->get($columns);
+
+        if ($results === []) {
+            throw new RecordNotFoundException($this->describeTable());
+        }
+
+        if (count($results) > 1) {
+            throw new RuntimeException(
+                'More than one record matched the query on [' . $this->describeTable() . '], but exactly one was expected.'
+            );
+        }
+
+        return $results[0];
+    }
+
+    /**
+     * The primary key column this query looks rows up by. 'id' unless told
+     * otherwise, and taken from the model when there is one.
+     */
+    public function keyName(string $column): self
+    {
+        $this->keyName = $column;
+
+        return $this;
+    }
+
+    public function getKeyName(): string
+    {
+        return $this->keyName;
+    }
+
+    /**
+     * @return Row|null the matching row, or null
      */
     public function find($id, array $columns = ['*'], ?string $column = null)
     {
-        return $this->where($this->qualifyColumn($column ?: 'id'), '=', $id)->first($columns);
+        return $this->where($this->qualifyColumn($column ?: $this->keyName), '=', $id)->first($columns);
+    }
+
+    /**
+     * @return Row the matching row
+     */
+    public function findOrFail($id, array $columns = ['*'], ?string $column = null)
+    {
+        $result = $this->find($id, $columns, $column);
+
+        if ($result === null) {
+            throw new RecordNotFoundException($this->describeTable(), $id);
+        }
+
+        return $result;
+    }
+
+    /**
+     * The matching row, or whatever the callback returns.
+     *
+     * @return Row|mixed
+     */
+    public function findOr($id, callable $callback, array $columns = ['*'])
+    {
+        $result = $this->find($id, $columns);
+
+        return $result ?? $callback($this);
+    }
+
+    protected function describeTable(): string
+    {
+        return is_string($this->from) && $this->from !== '' ? $this->from : 'the query';
     }
 
     /**
@@ -1308,6 +1486,14 @@ class Builder
         }
 
         return $results;
+    }
+
+    /**
+     * One column of every matching row, joined into a string.
+     */
+    public function implode(string $column, string $glue = ''): string
+    {
+        return implode($glue, $this->pluck($column));
     }
 
     public function exists(): bool
@@ -1397,6 +1583,51 @@ class Builder
         return true;
     }
 
+    /**
+     * Walk the table in key order rather than by page, so rows the callback
+     * changes cannot shift the ones still to come. Return false to stop.
+     */
+    public function chunkById(int $count, callable $callback, string $column = 'id'): bool
+    {
+        if ($count < 1) {
+            throw new InvalidArgumentException('The chunk size must be at least 1.');
+        }
+
+        $lastId = null;
+        $page = 1;
+
+        do {
+            $query = clone $this;
+            $query->orders = [];
+            $query->bindings['order'] = [];
+
+            if ($lastId !== null) {
+                $query->where($column, '>', $lastId);
+            }
+
+            $results = $query->orderBy($column)->limit($count)->get();
+            $countResults = count($results);
+
+            if ($countResults === 0) {
+                break;
+            }
+
+            if ($callback($results, $page) === false) {
+                return false;
+            }
+
+            $lastId = $results[$countResults - 1]->{$this->stripAlias($column)};
+
+            if ($lastId === null) {
+                throw new RuntimeException("chunkById() needs [{$column}] in the result set to page through it.");
+            }
+
+            $page++;
+        } while ($countResults === $count);
+
+        return true;
+    }
+
     public function each(callable $callback, int $count = 1000): bool
     {
         return $this->chunk($count, function (array $results) use ($callback) {
@@ -1441,6 +1672,91 @@ class Builder
     /* ------------------------------------------------------------------
      | Writing
      | ------------------------------------------------------------------ */
+
+    /**
+     * Insert one row and read it back.
+     *
+     *     $user = NDB::table('users')->create(['name' => 'John']);
+     *     $user->id;
+     *
+     * @return Row the stored row
+     */
+    public function create(array $values = [])
+    {
+        $id = (clone $this)->insertGetId($values);
+
+        if ($id !== null && $id !== 0 && $id !== '') {
+            $row = (clone $this)->where($this->qualifyColumn($this->keyName), '=', $id)->first();
+
+            if ($row !== null) {
+                return $row;
+            }
+        }
+
+        // No usable key came back: hand over what was written.
+        return new Row($values);
+    }
+
+    /**
+     * Insert several rows and read them all back, in one transaction.
+     *
+     * @return Row[]
+     */
+    public function createMany(array $rows): array
+    {
+        return $this->connection->transaction(function () use ($rows) {
+            $created = [];
+
+            foreach ($rows as $values) {
+                $created[] = $this->create($values);
+            }
+
+            return $created;
+        });
+    }
+
+    /**
+     * The first row matching $attributes, inserting it when there is none.
+     *
+     * @return Row
+     */
+    public function firstOrCreate(array $attributes, array $values = [])
+    {
+        $existing = (clone $this)->where($attributes)->first();
+
+        return $existing ?? $this->create(array_merge($attributes, $values));
+    }
+
+    /**
+     * Update the row matching $attributes, or insert it when there is none.
+     * Either way the stored row comes back.
+     *
+     * @return Row
+     */
+    public function updateOrCreate(array $attributes, array $values = [])
+    {
+        $existing = (clone $this)->where($attributes)->first();
+
+        if ($existing === null) {
+            return $this->create(array_merge($attributes, $values));
+        }
+
+        if ($values !== []) {
+            (clone $this)->where($attributes)->update($values);
+        }
+
+        return (clone $this)->where($attributes)->first() ?? $existing;
+    }
+
+    /**
+     * The same thing, under the name people reach for first.
+     *
+     * @return Row
+     */
+    public function createOrUpdate(array $attributes, array $values = [])
+    {
+        return $this->updateOrCreate($attributes, $values);
+    }
 
     /**
      * insert(['name' => 'John']) or insert([['name' => 'A'], ['name' => 'B']])
@@ -1490,6 +1806,27 @@ class Builder
         return $this->connection->affectingStatement(
             $this->grammar->compileInsert($this, $values, 'ignore'),
             $this->insertBindings($values)
+        );
+    }
+
+    /**
+     * Copy rows in from another query, without pulling them through PHP.
+     *
+     *     NDB::table('archived_orders')->insertUsing(
+     *         ['code', 'total'],
+     *         NDB::table('orders')->select('code', 'total')->where('status', 'done')
+     *     );
+     *
+     * @param Closure|Builder|string $query
+     * @return int the number of rows inserted
+     */
+    public function insertUsing(array $columns, $query): int
+    {
+        [$sql, $bindings] = $this->parseSub($query);
+
+        return $this->connection->affectingStatement(
+            $this->grammar->compileInsertUsing($this, $columns, $sql),
+            $bindings
         );
     }
 
@@ -1582,7 +1919,7 @@ class Builder
     public function delete($id = null): int
     {
         if ($id !== null) {
-            $this->where($this->qualifyColumn('id'), '=', $id);
+            $this->where($this->qualifyColumn($this->keyName), '=', $id);
         }
 
         return $this->connection->delete(

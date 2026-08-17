@@ -323,7 +323,9 @@ NDB::table('blog_posts')->insert([['published' => 1], ['published' => 0]]);
 
 class BlogPost extends NDB {}
 
-check('the plain builder still returns arrays',
-    BlogPost::query()->where('published', 1)->get(), [['id' => 1, 'published' => 1]]);
+check('the plain builder returns Row objects, read as properties',
+    BlogPost::query()->where('published', 1)->first()->published, 1);
+check('and toBase() still gives arrays',
+    BlogPost::query()->where('published', 1)->toBase(), [['id' => 1, 'published' => 1]]);
 
 summary();

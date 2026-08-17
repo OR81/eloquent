@@ -28,18 +28,18 @@ NDB::table('colors')->insert([['name' => 'red'], ['name' => 'blue']]);
 echo "== README: selecting ==\n";
 
 check('table with alias + aliased column',
-    NDB::table('users', 'u')->select('u.name as author')->orderBy('u.id')->limit(1)->get(),
+    plain(NDB::table('users', 'u')->select('u.name as author')->orderBy('u.id')->limit(1)->get()),
     [['author' => 'Alice']]);
 
 check('selectRaw multiple aggregates',
-    NDB::table('users')->selectRaw('count(*) as total, max(votes) as top')->first(),
+    plain(NDB::table('users')->selectRaw('count(*) as total, max(votes) as top')->first()),
     ['total' => 3, 'top' => 150]);
 
 check('selectSub correlated count',
-    NDB::table('users')->select('name')->selectSub(
+    plain(NDB::table('users')->select('name')->selectSub(
         NDB::table('orders')->from('posts')->selectRaw('count(*)')->whereColumn('posts.user_id', 'users.id'),
         'posts_count'
-    )->orderBy('users.id')->get(),
+    )->orderBy('users.id')->get()),
     [
         ['name' => 'Alice', 'posts_count' => 2],
         ['name' => 'Bob', 'posts_count' => 1],
@@ -51,7 +51,7 @@ check('fromSub',
     2);
 
 check('select with a raw expression',
-    NDB::table('users')->select(NDB::raw('count(*) as total'))->first(),
+    plain(NDB::table('users')->select(NDB::raw('count(*) as total'))->first()),
     ['total' => 3]);
 
 echo "\n== README: where sub queries ==\n";
@@ -85,13 +85,13 @@ check('join closure with an extra condition',
     ['Hello', 'Bob post']);
 
 check('joinSub',
-    NDB::table('users')->joinSub(
+    plain(NDB::table('users')->joinSub(
         NDB::table('posts')->select('user_id')->selectRaw('count(*) as total')->groupBy('user_id'),
         'stats',
         'users.id',
         '=',
         'stats.user_id'
-    )->orderBy('users.id')->select('users.name', 'stats.total')->get(),
+    )->orderBy('users.id')->select('users.name', 'stats.total')->get()),
     [
         ['name' => 'Alice', 'total' => 2],
         ['name' => 'Bob', 'total' => 1],
@@ -106,7 +106,7 @@ check('groupByRaw',
 
 check('havingBetween',
     NDB::table('posts')->select('user_id')->selectRaw('count(*) as total')
-        ->groupBy('user_id')->havingBetween('total', [2, 5])->get(),
+        ->groupBy('user_id')->havingBetween('total', [2, 5])->toBase(),
     [['user_id' => 1, 'total' => 2]]);
 
 check('havingRaw',
@@ -153,7 +153,7 @@ check('increment with extra columns',
     NDB::table('users')->where('id', 1)->increment('votes', 5, ['updated_at' => '2025-06-01']),
     1);
 check('increment applied',
-    NDB::table('users')->where('id', 1)->first(['votes', 'updated_at']),
+    plain(NDB::table('users')->where('id', 1)->first(['votes', 'updated_at'])),
     ['votes' => 155, 'updated_at' => '2025-06-01']);
 
 check('decrement',

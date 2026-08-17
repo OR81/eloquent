@@ -149,11 +149,13 @@ NDB::forget('reporting');          // drop both, so .env is read again
 
 There are two ways in, and they return the same query builder. Pick whichever suits the job.
 
-**A table, directly.** Rows come back as plain arrays.
+**A table, directly.** Rows come back as `Row` objects, so columns are read as properties.
 
 ```php
-NDB::table('users')->where('active', 1)->get();
-// [['id' => 1, 'name' => 'Alice', ...], ...]
+$user = NDB::table('users')->where('active', 1)->first();
+
+$user->name;
+$user->id;
 ```
 
 **A model.** Everything about the table is declared on a class, and rows come back as objects with casts applied. This is the [`Model`](#models) half of the package.
@@ -322,18 +324,31 @@ Calling a method that is neither a builder method nor a scope names the scope yo
 Order::all();
 Order::find(1);
 Order::findOrFail(1);                  // ModelNotFoundException when missing
+Order::findOr(1, fn () => $default);
 Order::where('status', 'paid')->first();
 Order::where('status', 'paid')->firstOrFail();
+Order::where('status', 'paid')->firstOr(fn () => $default);
+Order::query()->firstWhere('status', 'paid');
+Order::where('code', 'ORD-1')->sole();  // exactly one match, or it is an error
 Order::count();
 Order::query()->paginate(20, $page);   // 'data' holds models
 Order::query()->cursor();              // streams models
-Order::query()->toBase()->get();       // plain arrays instead
+Order::query()->chunkById(200, fn (array $orders) => ...);
+Order::query()->toBase();              // plain arrays instead
+```
 
+```php
 Order::create([...]);
+Order::query()->createMany([[...], [...]]);      // one transaction
 Order::query()->forceCreate([...]);              // ignores $fillable
 Order::query()->firstOrNew(['code' => 'X']);     // not saved
 Order::query()->firstOrCreate(['code' => 'X'], ['status' => 'pending']);
 Order::query()->updateOrCreate(['code' => 'X'], ['status' => 'paid']);
+Order::query()->createOrUpdate(['code' => 'X'], ['status' => 'paid']);
+
+Order::destroy(1);                     // delete by key, without loading first
+Order::destroy(1, 2, 3);
+Order::destroy([1, 2, 3]);
 ```
 
 ```php
@@ -347,11 +362,22 @@ $order->delete();
 $order->refresh();                     // re-read into this instance
 $fresh = $order->fresh();              // re-read into a new one
 
-$order->isDirty();                     // anything changed?
+$order->isDirty();                     // anything changed since it was loaded?
 $order->isDirty('status');
 $order->getDirty();                    // ['status' => 'shipped']
 $order->getOriginal('status');         // what it was when loaded
 $order->getAttributes();               // the raw column values
+
+$order->wasChanged();                  // did the last save() write anything?
+$order->wasChanged('status');
+$order->getChanges();                  // what it wrote
+
+$order->touch();                       // bump updated_at and nothing else
+$order->only(['code', 'total']);       // a subset, cast as usual
+$order->except(['meta']);
+$order->is($other);                    // same row?
+$order->isNot($other);
+$copy = $order->replicate();           // an unsaved copy, without the key or timestamps
 ```
 
 `save()` writes only the changed columns, and does nothing at all when nothing changed. `$timestamps` keeps `created_at` and `updated_at` current, and respects `$dateStorage` — a project that stores Jalali text gets Jalali timestamps.
@@ -419,7 +445,7 @@ $order['code'];        // works: the model is ArrayAccess
 
 ### Or skip the model
 
-If you want the table-name inference without any of the above, extend `NDB` instead. You get a plain query builder returning arrays:
+If you want the table-name inference without any of the above, extend `NDB` instead. You get a plain query builder returning `Row` objects:
 
 ```php
 class BlogPost extends NDB {}          // -> blog_posts
@@ -451,17 +477,76 @@ NDB::table('users')->select('name')->selectSub(
 NDB::table('x')->fromSub(NDB::table('users')->where('active', 1), 'active_users')->get();
 ```
 
+### Results are objects
+
+`get()` returns a list of `Row` objects and `first()`, `find()`, `findOrFail()` and `sole()` return one, so columns are read as properties:
+
+```php
+$user = NDB::table('users')->find(3);
+
+$user->name;
+$user->email;
+
+foreach (NDB::table('users')->get() as $user) {
+    echo $user->name;
+}
+```
+
+Array access still works, so nothing written against the older array results has to change:
+
+```php
+$user['name'];
+foreach ($user as $column => $value) { ... }
+count($user);
+json_encode($user);
+```
+
+A `Row` also has:
+
+```php
+$user->toArray();                  // the plain associative array
+$user->toJson();
+$user->get('nickname', 'none');    // with a default
+$user->has('nickname');            // present, even if null
+$user->only(['id', 'name']);
+$user->except(['password']);
+$user->keys();
+$user->values();
+```
+
+A column that is not in the result reads as `null`; use `has()` to tell an absent column from one that is really null.
+
+When you want plain arrays after all — for `array_column`, a CSV writer, or an assertion — ask for them:
+
+```php
+NDB::table('users')->toBase();     // [['id' => 1, 'name' => 'Alice'], ...]
+```
+
+`pluck()`, `value()` and the aggregates were never rows, and are unchanged.
+
 ### Single results
 
 ```php
-NDB::table('users')->first();                    // ?array
-NDB::table('users')->firstOrFail();              // throws when nothing matches
+NDB::table('users')->first();                    // ?Row
+NDB::table('users')->firstOrFail();              // throws RecordNotFoundException
+NDB::table('users')->firstOr(fn () => $default);
+NDB::table('users')->firstWhere('role', 'admin');
+NDB::table('users')->sole();                     // exactly one match, or it is an error
 NDB::table('users')->find(3);                    // by primary key
+NDB::table('users')->findOrFail(3);
+NDB::table('users')->findOr(3, fn () => $default);
 NDB::table('users')->where('id', 3)->value('email');
 NDB::table('users')->pluck('name');              // ['Alice', 'Bob']
 NDB::table('users')->pluck('name', 'id');        // [1 => 'Alice', 2 => 'Bob']
+NDB::table('users')->implode('name', ', ');      // 'Alice, Bob'
 NDB::table('users')->where('role', 'admin')->exists();
 NDB::table('users')->where('role', 'ghost')->doesntExist();
+```
+
+`find()`, `findOrFail()`, `create()` and `delete($id)` look rows up by `id`. Point them at a different key once:
+
+```php
+NDB::table('settings')->keyName('setting_key')->find('theme');
 ```
 
 ## Where clauses
@@ -497,6 +582,22 @@ NDB::table('users')->where('role', 'ghost')->doesntExist();
 Every one of these has an `orWhere*` counterpart.
 
 An operator the builder does not recognise throws rather than compiling into broken SQL, so `where('age', '=>', 5)` is caught at the call site. Reach for `whereRaw()` when you need something exotic.
+
+### One condition, several columns
+
+The search-box case. Each of these is compiled as a single group, so it cannot leak into the clauses around it:
+
+```php
+->whereAny(['name', 'email', 'phone'], 'like', "%{$term}%")   // any column matches
+->whereAll(['name', 'email'], 'like', "%{$term}%")            // every column matches
+->whereNone(['name', 'email'], 'like', "%{$term}%")           // no column matches
+```
+
+```sql
+where "role" = ? and ("name" like ? or "email" like ? or "phone" like ?)
+```
+
+`orWhereAny()` and `orWhereAll()` join the group on with `or`.
 
 ### Grouped conditions
 
@@ -760,15 +861,27 @@ NDB::table('users')->orderBy('id')->chunk(200, function (array $rows, int $page)
     // return false to stop early
 });
 
-NDB::table('users')->orderBy('id')->each(function (array $row) {
+NDB::table('users')->orderBy('id')->each(function (Row $row) {
     // one row at a time, fetched 1000 at a time
 });
 
 // Stream without buffering the whole result set
 foreach (NDB::table('logs')->cursor() as $row) {
-    // ...
+    echo $row->message;
 }
 ```
+
+`chunk()` pages with `limit`/`offset`, so rows the callback deletes or reorders shift the pages still to come. When the callback writes to the same table, page by key instead:
+
+```php
+NDB::table('users')->chunkById(200, function (array $rows) {
+    foreach ($rows as $row) {
+        NDB::table('users')->where('id', $row->id)->update(['migrated' => 1]);
+    }
+});
+```
+
+`chunkById` walks in key order and remembers where it got to, so nothing is skipped or seen twice. Pass a column name as the third argument when the key is not `id`.
 
 ## Conditional clauses
 
@@ -780,6 +893,41 @@ NDB::table('users')
 ```
 
 ## Inserting
+
+### Getting the row back
+
+`create()` inserts one row and reads it back, so the generated key and any column defaults the database filled in are there straight away:
+
+```php
+$user = NDB::table('users')->create(['name' => 'John', 'email' => 'john@example.com']);
+
+$user->id;          // 4, from the database
+$user->role;        // 'user', the column default
+```
+
+```php
+// Several at once, in one transaction: if any row fails, none of them land
+$users = NDB::table('users')->createMany([
+    ['name' => 'Alice', 'email' => 'alice@example.com'],
+    ['name' => 'Bob',   'email' => 'bob@example.com'],
+]);
+
+// Find it or make it
+NDB::table('users')->firstOrCreate(
+    ['email' => 'john@example.com'],     // what to match on
+    ['name' => 'John', 'votes' => 0]     // what to add when creating
+);
+
+// Update it or make it. Either way the stored row comes back.
+NDB::table('users')->updateOrCreate(
+    ['email' => 'john@example.com'],
+    ['votes' => 42]
+);
+
+NDB::table('users')->createOrUpdate([...], [...]);   // the same method, other name
+```
+
+### Plain inserts
 
 ```php
 NDB::table('users')->insert(['name' => 'John', 'email' => 'john@example.com']);
@@ -800,7 +948,15 @@ NDB::table('users')->upsert(
     ['email'],      // unique columns (required by SQLite, ignored by MySQL)
     ['votes']       // columns to update; defaults to every inserted column
 );
+
+// Copy rows in from another query, without pulling them through PHP
+NDB::table('archived_orders')->insertUsing(
+    ['code', 'total'],
+    NDB::table('orders')->select('code', 'total')->where('status', 'done')
+);
 ```
+
+Every row of a multi-row `insert()` must carry the same columns. One that does not is reported by position, rather than becoming a `VALUES` list the driver rejects with a vaguer message.
 
 ## Updating and deleting
 
@@ -956,10 +1112,10 @@ $daily = NDB::table('orders')
 $byMonth = [];
 
 foreach ($daily as $row) {
-    $month = Jalali::fromGregorian($row['day'])->format('Y/m');
+    $month = Jalali::fromGregorian($row->day)->format('Y/m');
 
-    $byMonth[$month]['total'] = ($byMonth[$month]['total'] ?? 0) + $row['total'];
-    $byMonth[$month]['orders'] = ($byMonth[$month]['orders'] ?? 0) + $row['orders'];
+    $byMonth[$month]['total'] = ($byMonth[$month]['total'] ?? 0) + $row->total;
+    $byMonth[$month]['orders'] = ($byMonth[$month]['orders'] ?? 0) + $row->orders;
 }
 
 // ['1403/05' => ['total' => 1010000, ...], '1403/06' => [...], '1403/07' => [...]]
@@ -1086,7 +1242,7 @@ $query = NDB::table('orders')
 $handle = fopen('orders.csv', 'w');
 
 foreach ($query->cursor() as $row) {
-    fputcsv($handle, [$row['code'], $row['name'], $row['created_at'], $row['total']]);
+    fputcsv($handle, [$row->code, $row->name, $row->created_at, $row->total]);
 }
 
 fclose($handle);
@@ -1137,15 +1293,17 @@ compile_test               126 passed    0 failed
 connection_test             74 passed    0 failed
 edge_cases_test             20 passed    0 failed
 env_test                    40 passed    0 failed
-examples_test               20 passed    0 failed
-grammar_test                63 passed    0 failed
+examples_test               28 passed    0 failed
+grammar_test                66 passed    0 failed
 jalali_api_test             29 passed    0 failed
 jalali_calendar_test        97 passed    0 failed
 jalali_query_test          122 passed    0 failed
+model_api_test              72 passed    0 failed
 model_test                 160 passed    0 failed
+row_test                   115 passed    0 failed
 where_variants_test         47 passed    0 failed
 ----------------------------------------------------------
-total                      833 passed    0 failed
+total                     1031 passed    0 failed
 ```
 
 Every public method of every class is exercised.
@@ -1181,6 +1339,8 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `jalali_query_test` | every Jalali clause against all four column shapes |
 | `jalali_api_test` | the Jalali examples in this file |
 | `model_test` | casts, mass assignment, timestamps, soft deletes, scopes, relations |
+| `model_api_test` | the model examples in this file |
+| `row_test` | results as objects, and the create/find helpers on both builders |
 | `examples_test` | the worked examples in this file |
 
 ## Classes
@@ -1189,8 +1349,9 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | --- | --- |
 | `NDB` | Entry point: configuration, connections, raw statements, transactions |
 | `Model` | Eloquent-style base model: casts, timestamps, soft deletes, scopes |
-| `ModelBuilder` | The query a model hands out; returns models instead of arrays |
+| `ModelBuilder` | The query a model hands out; returns models instead of rows |
 | `Builder` | The fluent query builder |
+| `Row` | One result row, read as properties or as an array |
 | `JoinClause` | The `ON` clause of a join; a `Builder` with `on()` / `orOn()` |
 | `Jalali` | An immutable Jalali date, plus the calendar maths and storage detection |
 | `Grammar` | Compiles a builder into SQL for the active driver |
@@ -1199,7 +1360,8 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `Str` | The name conversions behind table and accessor resolution |
 | `Expression` | A raw SQL fragment |
 | `QueryException` | A failed statement, with its SQL and bindings |
-| `ModelNotFoundException` | Thrown by `findOrFail()` and `firstOrFail()` |
+| `RecordNotFoundException` | Thrown by the builder's `findOrFail()`, `firstOrFail()` and `sole()` |
+| `ModelNotFoundException` | The same thing from a model; extends `RecordNotFoundException` |
 
 ## Upgrading from the old `DB` class
 
@@ -1216,6 +1378,24 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 - The global `dd()` function is gone. Use `$query->dump()` / `$query->dd()`.
 
 Automatic table naming is still there, and now handles `BlogPost` -> `blog_posts`, `Person` -> `people` and `Category` -> `categories`.
+
+### Rows became objects
+
+`get()`, `first()`, `find()` and `cursor()` used to hand back associative arrays and now hand back [`Row`](#results-are-objects) objects. `Row` implements `ArrayAccess`, `IteratorAggregate`, `Countable` and `JsonSerializable`, so the things usually done with those arrays keep working unchanged:
+
+```php
+$row['name'];                    // still fine
+foreach ($row as $col => $val)   // still fine
+count($row);                     // still fine
+json_encode($row);               // still fine
+```
+
+Two things do change:
+
+- A strict comparison against an array (`$rows === [['id' => 1]]`) no longer holds. Call `->toArray()`, or ask the query for `toBase()`.
+- Functions that require a real array — `array_column($rows, 'name')`, `array_map` over the columns of one row — need `toBase()` or `toArray()` first.
+
+`pluck()`, `value()`, the aggregates, and `Connection::select()` were never rows and are untouched.
 
 ## License
 
