@@ -1,9 +1,10 @@
 {
   "name": "or81/eloquent",
-  "description": "A lightweight and versatile PHP database class that supports both MySQL and SQLite, providing an easy-to-use interface for common database operations such as `SELECT`, `INSERT`, `UPDATE`, and `DELETE`.",
+  "description": "A lightweight, dependency-free SQL query builder for PHP with a Laravel-style fluent API. Supports MySQL and SQLite.",
   "type": "library",
   "require": {
-    "php": ">=8.0"
+    "php": ">=8.0",
+    "ext-pdo": "*"
   },
   "autoload": {
     "psr-4": {
