@@ -62,10 +62,31 @@ class Builder
         'rlike', 'not rlike', 'regexp', 'not regexp',
     ];
 
+    /**
+     * How each date column stores its value: column => [mode, format].
+     * See the Jalali class for the modes.
+     */
+    protected array $dateStorage = [];
+
+    /** @var array{0: string, 1: string|null} */
+    protected array $defaultDateStorage = [Jalali::GREGORIAN, 'Y-m-d'];
+
+    /** Columns to convert to Jalali on the way out: column => output format. */
+    protected array $jalaliCasts = [];
+
+    /** Storage detected by probing a table, keyed by connection|table|column. */
+    protected static array $detectedStorage = [];
+
     public function __construct(Connection $connection, ?Grammar $grammar = null)
     {
         $this->connection = $connection;
         $this->grammar = $grammar ?: $connection->getGrammar();
+
+        $mode = $connection->getConfig('date_storage');
+
+        if ($mode !== null) {
+            $this->defaultDateStorage = [$mode, $connection->getConfig('date_format') ?: Jalali::defaultFormatFor($mode)];
+        }
     }
 
     public function getConnection(): Connection
@@ -595,6 +616,341 @@ class Builder
     }
 
     /* ------------------------------------------------------------------
+     | Jalali (Shamsi) dates
+     |
+     | Every one of these compiles down to a half-open range over the plain
+     | column, so an index on it is still used. Nothing is wrapped in a
+     | function and no Jalali support is needed from the database.
+     | ------------------------------------------------------------------ */
+
+    /**
+     * Declare how a column stores its dates, which decides what the builder
+     * compares against.
+     *
+     *     ->dateStorage('created_at', Jalali::GREGORIAN)          // 2024-08-16 ...
+     *     ->dateStorage('issued_at', Jalali::JALALI)              // 1403/05/26
+     *     ->dateStorage('issued_at', Jalali::JALALI, 'Y-m-d')     // 1403-05-26
+     *     ->dateStorage('logged_at', Jalali::UNIX)                // 1723800000
+     */
+    public function dateStorage(string $column, string $mode, ?string $format = null): self
+    {
+        $this->dateStorage[$column] = [$mode, $format ?: Jalali::defaultFormatFor($mode)];
+
+        return $this;
+    }
+
+    /**
+     * Work out the storage of the given columns by reading one stored value.
+     * Costs one small query per column, cached for the rest of the process.
+     */
+    public function detectDateStorage(string ...$columns): self
+    {
+        if (! is_string($this->from) || $this->from === '') {
+            throw new RuntimeException('detectDateStorage() needs a plain table name to sample.');
+        }
+
+        foreach ($columns as $column) {
+            $key = spl_object_id($this->connection) . '|' . $this->from . '|' . $column;
+
+            if (! array_key_exists($key, self::$detectedStorage)) {
+                $sample = $this->newQuery()->from($this->from)->whereNotNull($column)->value($column);
+
+                self::$detectedStorage[$key] = Jalali::detectStorage($sample);
+            }
+
+            if (self::$detectedStorage[$key] !== null) {
+                [$mode, $format] = self::$detectedStorage[$key];
+
+                $this->dateStorage($column, $mode, $format);
+            }
+        }
+
+        return $this;
+    }
+
+    /**
+     * Convert a column to a Jalali string on the way out of get()/first()/cursor().
+     */
+    public function castJalali(string $column, string $format = 'Y/m/d H:i:s'): self
+    {
+        $this->jalaliCasts[$column] = $format;
+
+        return $this;
+    }
+
+    /**
+     * Compare against a Jalali date at day granularity.
+     *
+     *     ->whereJalali('created_at', '1403/05/26')          // that whole day
+     *     ->whereJalali('created_at', '>=', '1403/05/26')    // from that day on
+     *
+     * @param Jalali|string|array $value
+     */
+    public function whereJalali(string $column, $operator, $value = null, string $boolean = 'and'): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        $date = Jalali::parse($value)->startOfDay();
+
+        switch ($operator) {
+            case '=':
+                return $this->whereJalaliDate($column, $date, $boolean);
+            case '!=':
+            case '<>':
+                return $this->whereJalaliDate($column, $date, $boolean, true);
+            case '>':
+                return $this->where($column, '>=', $this->jalaliBoundary($column, $date->addDays(1)), $boolean);
+            case '>=':
+                return $this->where($column, '>=', $this->jalaliBoundary($column, $date), $boolean);
+            case '<':
+                return $this->where($column, '<', $this->jalaliBoundary($column, $date), $boolean);
+            case '<=':
+                return $this->where($column, '<', $this->jalaliBoundary($column, $date->addDays(1)), $boolean);
+            default:
+                throw new InvalidArgumentException("Operator [{$operator}] is not supported for Jalali comparisons.");
+        }
+    }
+
+    public function orWhereJalali(string $column, $operator, $value = null): self
+    {
+        [$value, $operator] = $this->prepareValueAndOperator($value, $operator, func_num_args() === 2);
+
+        return $this->whereJalali($column, $operator, $value, 'or');
+    }
+
+    /**
+     * A single Jalali day, from midnight to midnight.
+     *
+     * @param Jalali|string|array $date
+     */
+    public function whereJalaliDate(string $column, $date, string $boolean = 'and', bool $not = false): self
+    {
+        $date = Jalali::parse($date)->startOfDay();
+
+        return $this->addJalaliRange($column, $date, $date->addDays(1), $boolean, $not);
+    }
+
+    public function orWhereJalaliDate(string $column, $date): self
+    {
+        return $this->whereJalaliDate($column, $date, 'or');
+    }
+
+    /**
+     * Both ends are inclusive: the whole of the last day is covered.
+     *
+     * @param array{0: Jalali|string, 1: Jalali|string} $range
+     */
+    public function whereJalaliBetween(string $column, array $range, string $boolean = 'and', bool $not = false): self
+    {
+        if (count($range) < 2) {
+            throw new InvalidArgumentException('whereJalaliBetween() expects exactly two dates.');
+        }
+
+        $range = array_values($range);
+
+        $start = Jalali::parse($range[0])->startOfDay();
+        $end = Jalali::parse($range[1])->startOfDay();
+
+        if ($end->lessThan($start)) {
+            [$start, $end] = [$end, $start];
+        }
+
+        return $this->addJalaliRange($column, $start, $end->addDays(1), $boolean, $not);
+    }
+
+    public function orWhereJalaliBetween(string $column, array $range): self
+    {
+        return $this->whereJalaliBetween($column, $range, 'or');
+    }
+
+    public function whereJalaliNotBetween(string $column, array $range, string $boolean = 'and'): self
+    {
+        return $this->whereJalaliBetween($column, $range, $boolean, true);
+    }
+
+    /**
+     * A whole Jalali year, Farvardin 1 to the last day of Esfand.
+     */
+    public function whereJalaliYear(string $column, int $year, string $boolean = 'and', bool $not = false): self
+    {
+        $start = Jalali::create($year, 1, 1);
+
+        return $this->addJalaliRange($column, $start, $start->addYears(1), $boolean, $not);
+    }
+
+    public function orWhereJalaliYear(string $column, int $year): self
+    {
+        return $this->whereJalaliYear($column, $year, 'or');
+    }
+
+    /**
+     * A whole Jalali month. The year is required, since a month on its own is
+     * not a contiguous range.
+     */
+    public function whereJalaliMonth(string $column, int $year, int $month, string $boolean = 'and', bool $not = false): self
+    {
+        $start = Jalali::create($year, $month, 1);
+
+        return $this->addJalaliRange($column, $start, $start->addMonths(1), $boolean, $not);
+    }
+
+    public function orWhereJalaliMonth(string $column, int $year, int $month): self
+    {
+        return $this->whereJalaliMonth($column, $year, $month, 'or');
+    }
+
+    /**
+     * The Persian week containing the given day, Saturday through Friday.
+     *
+     * @param Jalali|string|null $date defaults to today
+     */
+    public function whereJalaliWeek(string $column, $date = null, string $boolean = 'and'): self
+    {
+        $start = ($date === null ? Jalali::today() : Jalali::parse($date))->startOfWeek();
+
+        return $this->addJalaliRange($column, $start, $start->addDays(7), $boolean, false);
+    }
+
+    public function whereJalaliToday(string $column, string $boolean = 'and'): self
+    {
+        return $this->whereJalaliDate($column, Jalali::today(), $boolean);
+    }
+
+    public function whereJalaliYesterday(string $column, string $boolean = 'and'): self
+    {
+        return $this->whereJalaliDate($column, Jalali::today()->subDays(1), $boolean);
+    }
+
+    public function whereJalaliTomorrow(string $column, string $boolean = 'and'): self
+    {
+        return $this->whereJalaliDate($column, Jalali::today()->addDays(1), $boolean);
+    }
+
+    public function whereJalaliThisWeek(string $column, string $boolean = 'and'): self
+    {
+        return $this->whereJalaliWeek($column, null, $boolean);
+    }
+
+    public function whereJalaliThisMonth(string $column, string $boolean = 'and'): self
+    {
+        $today = Jalali::today();
+
+        return $this->whereJalaliMonth($column, $today->year(), $today->month(), $boolean);
+    }
+
+    public function whereJalaliLastMonth(string $column, string $boolean = 'and'): self
+    {
+        $previous = Jalali::today()->startOfMonth()->subMonths(1);
+
+        return $this->whereJalaliMonth($column, $previous->year(), $previous->month(), $boolean);
+    }
+
+    public function whereJalaliThisYear(string $column, string $boolean = 'and'): self
+    {
+        return $this->whereJalaliYear($column, Jalali::today()->year(), $boolean);
+    }
+
+    /**
+     * The last N days, today included.
+     */
+    public function whereJalaliLastDays(string $column, int $days, string $boolean = 'and'): self
+    {
+        if ($days < 1) {
+            throw new InvalidArgumentException('The number of days must be at least 1.');
+        }
+
+        $today = Jalali::today();
+
+        return $this->addJalaliRange($column, $today->subDays($days - 1), $today->addDays(1), $boolean, false);
+    }
+
+    /**
+     * The half-open range [$start, $end) every Jalali clause is built from.
+     */
+    protected function addJalaliRange(string $column, Jalali $start, Jalali $end, string $boolean, bool $not): self
+    {
+        $from = $this->jalaliBoundary($column, $start);
+        $to = $this->jalaliBoundary($column, $end);
+
+        return $this->whereNested(function (Builder $query) use ($column, $from, $to, $not) {
+            if ($not) {
+                $query->where($column, '<', $from)->orWhere($column, '>=', $to);
+            } else {
+                $query->where($column, '>=', $from)->where($column, '<', $to);
+            }
+        }, $boolean);
+    }
+
+    /**
+     * The value to compare the column against for the start of the given day.
+     *
+     * @return int|string
+     */
+    protected function jalaliBoundary(string $column, Jalali $date)
+    {
+        [$mode, $format] = $this->storageFor($column);
+
+        if ($mode === Jalali::UNIX) {
+            return $date->startOfDay()->toTimestamp();
+        }
+
+        if (! Jalali::isSortableFormat($format)) {
+            throw new RuntimeException(
+                "Column [{$column}] stores dates as [{$format}], which does not sort chronologically, "
+                . 'so it cannot be range-queried. Store a zero-padded year-month-day value, or declare '
+                . 'the real format with dateStorage().'
+            );
+        }
+
+        return $mode === Jalali::JALALI
+            ? $date->format($format)
+            : $date->toGregorian()->format($format);
+    }
+
+    /**
+     * @return array{0: string, 1: string|null}
+     */
+    protected function storageFor(string $column): array
+    {
+        foreach ([$column, $this->stripAlias($column)] as $key) {
+            if (isset($this->dateStorage[$key])) {
+                return $this->dateStorage[$key];
+            }
+        }
+
+        return $this->defaultDateStorage;
+    }
+
+    /**
+     * Turn a stored value into a Jalali date, whatever calendar it is in.
+     */
+    protected function toJalali($value, string $column): Jalali
+    {
+        [$mode] = $this->storageFor($column);
+
+        if ($mode === Jalali::UNIX) {
+            return Jalali::fromTimestamp((int) $value);
+        }
+
+        return $mode === Jalali::JALALI ? Jalali::parse($value) : Jalali::fromGregorian($value);
+    }
+
+    protected function applyJalaliCasts(array $row): array
+    {
+        foreach ($this->jalaliCasts as $column => $format) {
+            $key = $this->stripAlias($column);
+
+            if (! array_key_exists($key, $row) || $row[$key] === null || $row[$key] === '') {
+                continue;
+            }
+
+            $row[$key] = $this->toJalali($row[$key], $column)->format($format);
+        }
+
+        return $row;
+    }
+
+    /* ------------------------------------------------------------------
      | Grouping & having
      | ------------------------------------------------------------------ */
 
@@ -860,28 +1216,49 @@ class Builder
      | Reading results
      | ------------------------------------------------------------------ */
 
-    public function get(array $columns = ['*']): array
+    /**
+     * The raw rows, before a subclass gets a chance to turn them into
+     * something else. Anything that needs plain arrays goes through here.
+     */
+    protected function runSelect(array $columns = ['*']): array
     {
-        return $this->onceWithColumns($columns, function () {
+        $rows = $this->onceWithColumns($columns, function () {
             return $this->connection->select($this->toSql(), $this->getBindings());
         });
+
+        return $this->jalaliCasts === [] ? $rows : array_map([$this, 'applyJalaliCasts'], $rows);
+    }
+
+    public function get(array $columns = ['*']): array
+    {
+        return $this->runSelect($columns);
     }
 
     public function cursor(array $columns = ['*']): Generator
     {
-        return $this->onceWithColumns($columns, function () {
+        $rows = $this->onceWithColumns($columns, function () {
             return $this->connection->cursor($this->toSql(), $this->getBindings());
         });
+
+        foreach ($rows as $row) {
+            yield $this->jalaliCasts === [] ? $row : $this->applyJalaliCasts($row);
+        }
     }
 
-    public function first(array $columns = ['*']): ?array
+    /**
+     * @return array|null the first matching row, or null
+     */
+    public function first(array $columns = ['*'])
     {
         $results = $this->limit(1)->get($columns);
 
         return $results[0] ?? null;
     }
 
-    public function firstOrFail(array $columns = ['*']): array
+    /**
+     * @return array the first matching row
+     */
+    public function firstOrFail(array $columns = ['*'])
     {
         $result = $this->first($columns);
 
@@ -892,9 +1269,12 @@ class Builder
         return $result;
     }
 
-    public function find($id, array $columns = ['*'], string $column = 'id'): ?array
+    /**
+     * @return array|null the matching row, or null
+     */
+    public function find($id, array $columns = ['*'], ?string $column = null)
     {
-        return $this->where($this->qualifyColumn($column), '=', $id)->first($columns);
+        return $this->where($this->qualifyColumn($column ?: 'id'), '=', $id)->first($columns);
     }
 
     /**
@@ -902,9 +1282,9 @@ class Builder
      */
     public function value(string $column)
     {
-        $row = (clone $this)->first([$column]);
+        $rows = (clone $this)->limit(1)->runSelect([$column]);
 
-        return $row === null ? null : reset($row);
+        return $rows === [] ? null : reset($rows[0]);
     }
 
     /**
@@ -912,7 +1292,7 @@ class Builder
      */
     public function pluck(string $column, ?string $key = null): array
     {
-        $rows = (clone $this)->get($key === null ? [$column] : [$column, $key]);
+        $rows = (clone $this)->runSelect($key === null ? [$column] : [$column, $key]);
 
         $columnKey = $this->stripAlias($column);
         $keyKey = $key === null ? null : $this->stripAlias($key);
@@ -983,7 +1363,7 @@ class Builder
         $query->orders = [];
         $query->bindings['order'] = [];
 
-        $results = $query->get();
+        $results = $query->runSelect();
 
         return $results[0]['aggregate'] ?? null;
     }
@@ -1433,9 +1813,26 @@ class Builder
             return [$values];
         }
 
-        foreach ($values as $key => $value) {
-            ksort($value);
-            $values[$key] = $value;
+        $columns = null;
+        $index = 0;
+
+        foreach ($values as $key => $row) {
+            ksort($row);
+            $values[$key] = $row;
+
+            if ($columns === null) {
+                $columns = array_keys($row);
+            } elseif (array_keys($row) !== $columns) {
+                // Left alone this compiles to a VALUES list with mismatched
+                // widths, which the driver rejects with a far vaguer message.
+                throw new InvalidArgumentException(
+                    'Every row of a multi-row insert must have the same columns. Row ' . $index
+                    . ' has [' . implode(', ', array_keys($row)) . '] but the first row has ['
+                    . implode(', ', $columns) . '].'
+                );
+            }
+
+            $index++;
         }
 
         return array_values($values);

@@ -29,6 +29,20 @@ class NDB
      */
     protected static ?string $connectionName = null;
 
+    /**
+     * Override in a subclass to say how its date columns are stored, so the
+     * whereJalali*() methods know what to compare against:
+     *
+     *     protected static array $dateStorage = [
+     *         'created_at' => Jalali::GREGORIAN,
+     *         'issued_at'  => [Jalali::JALALI, 'Y-m-d'],
+     *         'logged_at'  => Jalali::UNIX,
+     *     ];
+     *
+     * @var array<string, string|array{0: string, 1: string|null}>
+     */
+    protected static array $dateStorage = [];
+
     /** @var array<string, array> */
     private static array $configs = [];
 
@@ -42,13 +56,18 @@ class NDB
      | ------------------------------------------------------------------ */
 
     /**
+     * Override what the environment says. Anything left out keeps its .env
+     * value, so a single key can be changed on its own:
+     *
+     *     NDB::configure(['database' => 'shop_test']);
+     *
      * MySQL: ['driver' => 'mysql', 'host' => '127.0.0.1', 'port' => 3306,
      *         'database' => '...', 'username' => '...', 'password' => '...']
      * SQLite: ['driver' => 'sqlite', 'database' => '/path/to/db.sqlite']
      */
     public static function configure(array $config, string $name = 'default'): void
     {
-        self::$configs[$name] = $config;
+        self::$configs[$name] = array_merge(static::envConfig($name) ?? [], $config);
 
         unset(self::$connections[$name]);
     }
@@ -58,16 +77,83 @@ class NDB
         $name = $name ?: self::$defaultConnection;
 
         if (! isset(self::$connections[$name])) {
-            if (! isset(self::$configs[$name])) {
+            $config = self::$configs[$name] ?? static::envConfig($name);
+
+            if ($config === null) {
                 throw new InvalidArgumentException(
-                    "Database connection [{$name}] is not configured. Call NDB::configure([...]) first."
+                    "Database connection [{$name}] is not configured. Call NDB::configure([...]), "
+                    . 'or set DB_CONNECTION and DB_DATABASE in a .env file.'
                 );
             }
 
-            self::$connections[$name] = new Connection(self::$configs[$name]);
+            self::$configs[$name] = $config;
+            self::$connections[$name] = new Connection($config);
         }
 
         return self::$connections[$name];
+    }
+
+    /**
+     * Read a .env file from somewhere other than the auto-discovered location.
+     * Call it before the first query: it discards every cached config and
+     * connection so everything is read again from the new file.
+     */
+    public static function useEnv(string $path): void
+    {
+        Env::use($path);
+
+        self::forget();
+    }
+
+    /**
+     * The connection config the environment describes, or null when it says
+     * nothing about this connection.
+     *
+     * The default connection reads DB_*; any other name reads {NAME}_DB_*, so
+     * a typo in a connection name still fails loudly instead of silently
+     * pointing at the main database.
+     *
+     * Recognised keys: DB_CONNECTION (or DB_DRIVER), DB_HOST, DB_PORT,
+     * DB_DATABASE, DB_USERNAME, DB_PASSWORD, DB_CHARSET, DB_COLLATION,
+     * DB_SOCKET, DB_DATE_STORAGE, DB_DATE_FORMAT.
+     */
+    public static function envConfig(?string $name = null): ?array
+    {
+        $name = $name ?: self::$defaultConnection;
+
+        $prefix = $name === self::$defaultConnection ? '' : strtoupper($name) . '_';
+
+        $driver = Env::get($prefix . 'DB_CONNECTION') ?? Env::get($prefix . 'DB_DRIVER');
+        $database = Env::get($prefix . 'DB_DATABASE');
+
+        if ($driver === null && $database === null) {
+            return null;
+        }
+
+        $config = array_filter([
+            'driver' => $driver,
+            'host' => Env::get($prefix . 'DB_HOST'),
+            'port' => Env::get($prefix . 'DB_PORT'),
+            'unix_socket' => Env::get($prefix . 'DB_SOCKET'),
+            'database' => $database,
+            'username' => Env::get($prefix . 'DB_USERNAME'),
+            'password' => Env::get($prefix . 'DB_PASSWORD'),
+            'charset' => Env::get($prefix . 'DB_CHARSET'),
+            'collation' => Env::get($prefix . 'DB_COLLATION'),
+            'date_storage' => Env::get($prefix . 'DB_DATE_STORAGE'),
+            'date_format' => Env::get($prefix . 'DB_DATE_FORMAT'),
+        ], fn ($value) => $value !== null);
+
+        if (isset($config['port'])) {
+            $config['port'] = (int) $config['port'];
+        }
+
+        // An empty password is a real setting, so put it back if it was given.
+        if (! isset($config['password']) && Env::has($prefix . 'DB_PASSWORD')) {
+            $config['password'] = '';
+        }
+
+        return $config;
     }
 
     public static function setConnection(Connection $connection, string $name = 'default'): void
@@ -86,7 +172,8 @@ class NDB
     }
 
     /**
-     * Drop a cached connection so the next query reconnects.
+     * Drop a cached connection so the next query reconnects. The config it was
+     * built from is kept: use forget() to discard that too.
      */
     public static function purge(?string $name = null): void
     {
@@ -97,6 +184,22 @@ class NDB
         }
 
         unset(self::$connections[$name]);
+    }
+
+    /**
+     * Drop both the connection and the config behind it, so the next query
+     * reads the environment again from scratch.
+     */
+    public static function forget(?string $name = null): void
+    {
+        if ($name === null) {
+            self::$configs = [];
+            self::$connections = [];
+
+            return;
+        }
+
+        unset(self::$configs[$name], self::$connections[$name]);
     }
 
     public static function getPdo(?string $name = null): PDO
@@ -121,7 +224,13 @@ class NDB
             );
         }
 
-        return static::newBuilder()->from($table, $as);
+        $builder = static::newBuilder()->from($table, $as);
+
+        foreach (static::$dateStorage as $column => $storage) {
+            $builder->dateStorage($column, ...array_values((array) $storage));
+        }
+
+        return $builder;
     }
 
     /**

@@ -1,15 +1,31 @@
 {
   "name": "or81/eloquent",
-  "description": "A lightweight, dependency-free SQL query builder for PHP with a Laravel-style fluent API. Supports MySQL and SQLite.",
+  "description": "A lightweight, dependency-free ORM and SQL query builder for PHP with a Laravel-style fluent API. Supports MySQL and SQLite, reads its credentials from .env, and queries by Jalali (Shamsi) date out of the box.",
+  "keywords": ["database", "orm", "query-builder", "model", "sql", "mysql", "sqlite", "jalali", "shamsi", "persian-date", "dotenv"],
   "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Omid Rajabi",
+      "email": "omidrajabi81@gmail.com"
+    }
+  ],
   "require": {
     "php": ">=8.0",
     "ext-pdo": "*"
+  },
+  "suggest": {
+    "vlucas/phpdotenv": "Used to load the .env file when present; a built-in reader is used otherwise.",
+    "ext-pdo_mysql": "To connect to MySQL.",
+    "ext-pdo_sqlite": "To connect to SQLite."
   },
   "autoload": {
     "psr-4": {
       "Or81\\Eloquent\\": "src/"
     }
+  },
+  "scripts": {
+    "test": "php tests/run.php"
   },
   "minimum-stability": "dev",
   "prefer-stable": true
