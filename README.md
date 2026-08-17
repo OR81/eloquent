@@ -1428,6 +1428,64 @@ try {
 }
 ```
 
+### The same thing for thousands of rows
+
+The single-row version binds the incoming value with `?`. A batch cannot: one placeholder would be one value for every row in the statement. The update clause has to name the incoming value instead, which is what `incoming()` gives you — `values(col)` on MySQL, `excluded.col` on SQLite, evaluated per row.
+
+```php
+use Or81\Eloquent\NDB;
+
+/** What counts as blank for a column. */
+function blankChain(string $expression, array $alsoBlank = []): string
+{
+    $sql = "trim({$expression})";
+
+    foreach (array_merge([''], $alsoBlank) as $blank) {
+        $sql = "nullif({$sql}, '" . str_replace("'", "''", $blank) . "')";
+    }
+
+    return $sql;
+}
+
+/** Keep what is stored, else take what came in, else leave the row alone. */
+function fillBlank(string $column, array $alsoBlank = [])
+{
+    return NDB::raw(sprintf(
+        'coalesce(%s, %s, %s)',
+        blankChain($column, $alsoBlank),
+        blankChain((string) NDB::incoming($column), $alsoBlank),
+        $column
+    ));
+}
+
+function saveStudents(array $students, int $size = 500): int
+{
+    $written = 0;
+
+    foreach (array_chunk($students, $size) as $batch) {
+        $written += NDB::table('vadana')->upsert($batch, ['national_code'], [
+            'city'    => fillBlank('city'),
+            'code'    => fillBlank('code'),
+            'lessons' => fillBlank('lessons', ['[]', 'null']),
+        ]);
+    }
+
+    return $written;
+}
+```
+
+```php
+saveStudents([
+    ['name' => 'علی رضایی',  'national_code' => '001', 'student_code' => 'S-1', 'code' => '',    'city' => null,     'lessons' => '[]'],
+    ['name' => 'مریم احمدی', 'national_code' => '002', 'student_code' => 'S-2', 'code' => 'B-2', 'city' => 'اصفهان', 'lessons' => '["شیمی"]'],
+    // ... thousands more
+]);
+```
+
+Every row is judged on its own values inside one statement: a row whose stored `city` is blank takes the incoming one, a row that already has a city keeps it, and a blank incoming value cannot wipe anything because it is put through the same `nullif` chain.
+
+Each chunk is one round trip. 500 rows of six columns is 3000 placeholders, comfortably inside MySQL's limit; lower it if your rows are wider. A chunk is all-or-nothing, so a single bad row rejects its whole batch — wrap the call in a try/catch and retry that chunk row by row if you need to isolate the offender.
+
 ### Walking a large table
 
 ```php
@@ -1447,6 +1505,7 @@ php tests/run.php
 ```
 
 ```
+batch_upsert_test           25 passed    0 failed
 builder_api_test            35 passed    0 failed
 compile_test               126 passed    0 failed
 conflict_test               31 passed    0 failed
@@ -1464,7 +1523,7 @@ raw_bindings_test           32 passed    0 failed
 row_test                   115 passed    0 failed
 where_variants_test         47 passed    0 failed
 ----------------------------------------------------------
-total                     1094 passed    0 failed
+total                     1119 passed    0 failed
 ```
 
 Every public method of every class is exercised.
@@ -1504,6 +1563,7 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `row_test` | results as objects, and the create/find helpers on both builders |
 | `raw_bindings_test` | raw fragments carrying bindings, and the fill-in-the-blanks update |
 | `conflict_test` | telling one failure from another, and insert-or-fill-blanks |
+| `batch_upsert_test` | many rows per statement, each judged on its own values |
 | `examples_test` | the worked examples in this file |
 
 ## Classes

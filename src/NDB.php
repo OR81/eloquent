@@ -262,6 +262,16 @@ class NDB
         return new Expression($value, $bindings);
     }
 
+    /**
+     * Inside an upsert's update list, the value that was being inserted for
+     * this column: values(col) on MySQL, excluded.col on SQLite. Evaluated per
+     * row, which is what a multi-row upsert needs.
+     */
+    public static function incoming(string $column): Expression
+    {
+        return new Expression(static::connection(static::$connectionName)->getGrammar()->incomingValue($column));
+    }
+
     /* ------------------------------------------------------------------
      | Raw statements
      | ------------------------------------------------------------------ */

@@ -509,6 +509,21 @@ class Grammar
         return "insert into {$table} (" . $this->columnize($columns) . ") {$select}";
     }
 
+    /**
+     * How an upsert's update clause refers to the value that was being
+     * inserted, as opposed to the one already stored. MySQL spells it
+     * values(col) and SQLite excluded.col.
+     *
+     * This is what makes a multi-row upsert able to treat each row on its own
+     * terms: a bound ? would be one value for the whole statement.
+     */
+    public function incomingValue(string $column): string
+    {
+        return $this->driver === 'mysql'
+            ? 'values(' . $this->wrap($column) . ')'
+            : $this->wrapValue('excluded') . '.' . $this->wrap($column);
+    }
+
     public function compileUpsert(Builder $query, array $values, array $uniqueBy, array $update): string
     {
         $sql = $this->compileInsert($query, $values);

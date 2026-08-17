@@ -1827,6 +1827,22 @@ class Builder
     }
 
     /**
+     * Inside an upsert's update list, the value that was being inserted for
+     * this column, rather than the one already stored.
+     *
+     *     ->upsert($rows, ['code'], [
+     *         'city' => NDB::raw("coalesce(city, {$query->incoming('city')})"),
+     *     ])
+     *
+     * Unlike a bound value this is evaluated per row, so it is what a
+     * multi-row upsert needs.
+     */
+    public function incoming(string $column): Expression
+    {
+        return new Expression($this->grammar->incomingValue($column));
+    }
+
+    /**
      * Insert rows, updating the given columns when a unique constraint collides.
      *
      * @param array|string $uniqueBy columns of the unique index (required by SQLite, ignored by MySQL)
