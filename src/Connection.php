@@ -102,14 +102,46 @@ class Connection
 
     /**
      * Stream rows one at a time instead of buffering the whole result set.
+     *
+     * PDO buffers by default on MySQL, which means the entire result set is
+     * pulled into memory by execute() and fetching one row at a time saves
+     * nothing. Buffering is turned off for the duration and restored after.
+     *
+     * While an unbuffered cursor is open MySQL will not run another query on
+     * the same connection, so finish the loop (or break out of it) before
+     * querying again, or use a second connection.
      */
     public function cursor(string $query, array $bindings = []): Generator
     {
-        $statement = $this->run($query, $bindings);
+        $unbuffered = $this->unbufferedFetching();
+        $previous = null;
 
-        while (($record = $statement->fetch(PDO::FETCH_ASSOC)) !== false) {
-            yield $record;
+        if ($unbuffered) {
+            $previous = $this->getPdo()->getAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY);
+
+            $this->getPdo()->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
         }
+
+        try {
+            $statement = $this->run($query, $bindings);
+
+            while (($record = $statement->fetch(PDO::FETCH_ASSOC)) !== false) {
+                yield $record;
+            }
+        } finally {
+            if ($unbuffered) {
+                $this->getPdo()->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, $previous ?? true);
+            }
+        }
+    }
+
+    /**
+     * Whether this connection has to be told not to buffer. Only MySQL does;
+     * SQLite streams either way.
+     */
+    protected function unbufferedFetching(): bool
+    {
+        return $this->config['driver'] === 'mysql' && defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY');
     }
 
     public function insert(string $query, array $bindings = []): bool

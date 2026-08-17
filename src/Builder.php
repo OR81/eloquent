@@ -1466,14 +1466,14 @@ class Builder
      */
     public function pluck(string $column, ?string $key = null): array
     {
-        $rows = (clone $this)->runSelect($key === null ? [$column] : [$column, $key]);
-
         $columnKey = $this->stripAlias($column);
         $keyKey = $key === null ? null : $this->stripAlias($key);
 
         $results = [];
 
-        foreach ($rows as $row) {
+        // Streamed rather than fetched in one go: only the values being kept
+        // stay in memory, not a row array for each of them as well.
+        foreach ($this->streamRaw($key === null ? [$column] : [$column, $key]) as $row) {
             if ($keyKey === null) {
                 $results[] = $row[$columnKey] ?? null;
             } else {
@@ -1482,6 +1482,24 @@ class Builder
         }
 
         return $results;
+    }
+
+    /**
+     * The raw rows, one at a time, with nothing built on top of them.
+     *
+     * @return Generator<array>
+     */
+    protected function streamRaw(array $columns = ['*']): Generator
+    {
+        $query = clone $this;
+
+        $rows = $query->onceWithColumns($columns, function () use ($query) {
+            return $query->connection->cursor($query->toSql(), $query->getBindings());
+        });
+
+        foreach ($rows as $row) {
+            yield $query->jalaliCasts === [] ? $row : $query->applyJalaliCasts($row);
+        }
     }
 
     /**

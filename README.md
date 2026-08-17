@@ -871,6 +871,37 @@ foreach (NDB::table('logs')->cursor() as $row) {
 }
 ```
 
+### Reading a table too big for memory
+
+`get()` builds the whole result set before returning it: a row array and a `Row` object for every record. On a few hundred thousand rows that is enough to exhaust a default 128 MB limit.
+
+```php
+// 268,000 rows of one column
+NDB::table('vadana')->select('student_code')->get();     // 140 MB
+NDB::table('vadana')->pluck('student_code');             //  20 MB
+```
+
+`pluck()` streams and keeps only the values, so use it whenever you want one column. `cursor()` streams whole rows, holding one at a time:
+
+```php
+foreach (NDB::table('vadana')->cursor() as $student) {
+    // one row in memory, however many the table has
+}
+```
+
+PDO buffers by default on MySQL, which would pull the entire result set into memory at `execute()` and make fetching one row at a time pointless. `cursor()` turns buffering off for its own duration and puts it back afterwards, including when you `break` or an exception is thrown. **While an unbuffered cursor is open MySQL will not run another query on that connection** — finish or leave the loop before querying again, or use a [second connection](#multiple-connections).
+
+Narrowing the query is better still. Loading only the keys you are about to look at costs a fraction of loading them all:
+
+```php
+$seen = array_flip(
+    NDB::table('vadana')
+        ->whereNotNull('student_code')
+        ->whereBetween('student_code', [$from, $to])
+        ->pluck('student_code')
+);                                                       // 4 MB
+```
+
 `chunk()` pages with `limit`/`offset`, so rows the callback deletes or reorders shift the pages still to come. When the callback writes to the same table, page by key instead:
 
 ```php
@@ -1521,9 +1552,10 @@ model_api_test              72 passed    0 failed
 model_test                 160 passed    0 failed
 raw_bindings_test           32 passed    0 failed
 row_test                   115 passed    0 failed
+streaming_test              20 passed    0 failed
 where_variants_test         47 passed    0 failed
 ----------------------------------------------------------
-total                     1119 passed    0 failed
+total                     1139 passed    0 failed
 ```
 
 Every public method of every class is exercised.
@@ -1564,6 +1596,7 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `raw_bindings_test` | raw fragments carrying bindings, and the fill-in-the-blanks update |
 | `conflict_test` | telling one failure from another, and insert-or-fill-blanks |
 | `batch_upsert_test` | many rows per statement, each judged on its own values |
+| `streaming_test` | reading a large result set without holding it all at once |
 | `examples_test` | the worked examples in this file |
 
 ## Classes
