@@ -1848,7 +1848,15 @@ class Builder
         $bindings = $this->insertBindings($values);
 
         foreach ($update as $key => $value) {
-            if (! is_numeric($key) && ! $value instanceof Expression) {
+            if (is_numeric($key)) {
+                continue;   // a bare column name: the driver reuses the inserted value
+            }
+
+            if ($value instanceof Expression) {
+                foreach ($value->getBindings() as $binding) {
+                    $bindings[] = $binding;
+                }
+            } else {
                 $bindings[] = $value;
             }
         }

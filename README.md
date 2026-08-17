@@ -1052,14 +1052,46 @@ NDB::getQueryLog();     // [['query' => ..., 'bindings' => [...], 'time' => 0.42
 A failed statement throws `Or81\Eloquent\QueryException`, carrying the SQL and bindings that caused it:
 
 ```php
+use Or81\Eloquent\QueryException;
+
 try {
     NDB::table('users')->insert(['nope' => 1]);
-} catch (\Or81\Eloquent\QueryException $e) {
+} catch (QueryException $e) {
     $e->getSql();
     $e->getBindings();
     $e->getPrevious();   // the underlying PDOException
 }
 ```
+
+> **`QueryException` is not a `PDOException`.** It extends `RuntimeException` and keeps the driver's exception as its previous. `catch (PDOException $e)` will not fire, and `$e->errorInfo` is not on it — reach for the helpers below instead.
+
+### Telling one failure from another
+
+```php
+try {
+    NDB::table('students')->insert($student);
+} catch (QueryException $e) {
+    if ($e->isUniqueViolation()) {
+        // this row is already there
+    } elseif ($e->isForeignKeyViolation()) {
+        // it points at something that does not exist
+    } else {
+        throw $e;
+    }
+}
+```
+
+`isUniqueViolation()` covers MySQL's 1062 and SQLite's 19 / 1555 / 2067, so nothing has to test for a driver code by hand. The raw values are there when you want them:
+
+```php
+$e->getSqlState();     // '23000'
+$e->getDriverCode();   // 1062 on MySQL, 19 on SQLite
+$e->getErrorInfo();    // ['23000', 1062, 'Duplicate entry ...']
+```
+
+### Better still, do not collide
+
+Catching a duplicate to then update is a race: another process can insert the same row between your `insert` and your `update`. `upsert()` settles it in one atomic statement, and the [worked example below](#insert-or-fill-in-only-the-blanks) shows the fill-in-the-blanks version.
 
 ## Worked examples
 
@@ -1337,6 +1369,65 @@ fillColumn($studentId, 'lessons', $lessonsJson, ['[]', 'null']);
 
 Three round trips instead of one, but each condition is spelled out and the return value tells you which columns were actually filled.
 
+### Insert, or fill in only the blanks
+
+A student record arrives repeatedly, sometimes more complete than last time. Insert it if it is new; if it is already there, top up only the columns still empty and leave everything else alone.
+
+The obvious shape is `insert` inside a `try`, catching the duplicate and updating in the `catch`. Two things go wrong with that. `QueryException` is not a `PDOException`, so `catch (PDOException $e)` never fires. And even correctly caught, there is a window between the failed insert and the update in which another process can write the same row.
+
+`upsert()` does the whole thing in one statement:
+
+```php
+$blank = fn ($value) => $value === null || trim((string) $value) === '';
+
+$student = [
+    'name'          => $name,
+    'national_code' => $studentId,
+    'student_code'  => $studentCode,
+    'code'          => $code,
+    'city'          => $city,
+    'lessons'       => $lessonsJson,
+];
+
+NDB::table('vadana')->upsert(
+    [$student],
+    ['national_code'],          // the unique index that decides "already there"
+    [                            // what to do when it is
+        'city' => NDB::raw(
+            "coalesce(nullif(trim(city), ''), ?, city)",
+            [$blank($city) ? null : $city]
+        ),
+        'code' => NDB::raw(
+            "coalesce(nullif(trim(code), ''), ?, code)",
+            [$blank($code) ? null : $code]
+        ),
+        'lessons' => NDB::raw(
+            "coalesce(nullif(nullif(nullif(trim(lessons), ''), '[]'), 'null'), ?, lessons)",
+            [$blank($lessonsJson) ? null : $lessonsJson]
+        ),
+    ]
+);
+```
+
+The third argument lists the only columns an existing row may have written to, so `name` and `student_code` are used on insert and ignored on conflict. Each `coalesce` keeps the stored value when it is not blank, falls back to the incoming one, and leaves the row unchanged when neither has anything.
+
+MySQL needs a unique index on `national_code`; SQLite needs the same, and uses the column list to find it.
+
+When a write genuinely cannot be saved — a missing `NOT NULL`, a bad foreign key — that is still an exception, and worth keeping:
+
+```php
+try {
+    // the upsert above
+} catch (QueryException $e) {
+    file_put_contents(
+        __DIR__ . '/failed_inserts.jsonl',
+        json_encode($student + ['error' => $e->getMessage()],
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . PHP_EOL,
+        FILE_APPEND | LOCK_EX
+    );
+}
+```
+
 ### Walking a large table
 
 ```php
@@ -1358,6 +1449,7 @@ php tests/run.php
 ```
 builder_api_test            35 passed    0 failed
 compile_test               126 passed    0 failed
+conflict_test               31 passed    0 failed
 connection_test             74 passed    0 failed
 edge_cases_test             20 passed    0 failed
 env_test                    40 passed    0 failed
@@ -1372,7 +1464,7 @@ raw_bindings_test           32 passed    0 failed
 row_test                   115 passed    0 failed
 where_variants_test         47 passed    0 failed
 ----------------------------------------------------------
-total                     1063 passed    0 failed
+total                     1094 passed    0 failed
 ```
 
 Every public method of every class is exercised.
@@ -1411,6 +1503,7 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `model_api_test` | the model examples in this file |
 | `row_test` | results as objects, and the create/find helpers on both builders |
 | `raw_bindings_test` | raw fragments carrying bindings, and the fill-in-the-blanks update |
+| `conflict_test` | telling one failure from another, and insert-or-fill-blanks |
 | `examples_test` | the worked examples in this file |
 
 ## Classes
