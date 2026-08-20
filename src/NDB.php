@@ -115,7 +115,7 @@ class NDB
      *
      * Recognised keys: DB_CONNECTION (or DB_DRIVER), DB_HOST, DB_PORT,
      * DB_DATABASE, DB_USERNAME, DB_PASSWORD, DB_CHARSET, DB_COLLATION,
-     * DB_SOCKET, DB_DATE_STORAGE, DB_DATE_FORMAT.
+     * DB_SOCKET, DB_RECONNECT, DB_DATE_STORAGE, DB_DATE_FORMAT.
      */
     public static function envConfig(?string $name = null): ?array
     {
@@ -140,6 +140,7 @@ class NDB
             'password' => Env::get($prefix . 'DB_PASSWORD'),
             'charset' => Env::get($prefix . 'DB_CHARSET'),
             'collation' => Env::get($prefix . 'DB_COLLATION'),
+            'reconnect' => Env::get($prefix . 'DB_RECONNECT'),
             'date_storage' => Env::get($prefix . 'DB_DATE_STORAGE'),
             'date_format' => Env::get($prefix . 'DB_DATE_FORMAT'),
         ], fn ($value) => $value !== null);
@@ -205,6 +206,24 @@ class NDB
     public static function getPdo(?string $name = null): PDO
     {
         return static::connection($name)->getPdo();
+    }
+
+    /**
+     * Drop the live connection and open a new one, keeping the same
+     * Connection object so anything holding on to it keeps working.
+     */
+    public static function reconnect(?string $name = null): void
+    {
+        static::connection($name)->reconnect();
+    }
+
+    /**
+     * Whether the server is still there, reconnecting if it is not. Useful in
+     * a long-running script that goes quiet for longer than wait_timeout.
+     */
+    public static function ping(?string $name = null): bool
+    {
+        return static::connection($name)->ping();
     }
 
     /* ------------------------------------------------------------------

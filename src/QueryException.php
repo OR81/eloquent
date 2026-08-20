@@ -11,6 +11,32 @@ use Throwable;
  */
 class QueryException extends RuntimeException
 {
+    /**
+     * What a dropped connection looks like when the driver reports it as text
+     * rather than as a number.
+     */
+    protected const LOST_CONNECTION_MESSAGES = [
+        'server has gone away',
+        'Lost connection',
+        'no connection to the server',
+        'is dead or not enabled',
+        'Error while sending',
+        'Error writing data to the connection',
+        'server closed the connection unexpectedly',
+        'SSL connection has been closed unexpectedly',
+        'Packets out of order',
+        'connection is no longer usable',
+        'Communication link failure',
+        'reset by peer',
+        'Broken pipe',
+        'Connection refused',
+        'Connection timed out',
+        'Temporary failure in name resolution',
+        'php_network_getaddresses',
+        'query_wait_timeout',
+        'because of inactivity',
+    ];
+
     protected string $sql;
     protected array $bindings;
 
@@ -89,6 +115,18 @@ class QueryException extends RuntimeException
     }
 
     /**
+     * Whether the server was no longer there when the statement ran: the
+     * connection had been closed, killed, or timed out from under it.
+     *
+     * A long-running script that sits idle for longer than MySQL's
+     * wait_timeout sees this on its next query.
+     */
+    public function isLostConnection(): bool
+    {
+        return static::causedByLostConnection($this->getPrevious() ?? $this);
+    }
+
+    /**
      * Whether a foreign key stopped the statement.
      */
     public function isForeignKeyViolation(): bool
@@ -100,6 +138,37 @@ class QueryException extends RuntimeException
         }
 
         return $code === 19 && stripos($this->getErrorInfo()[2] ?? '', 'foreign key') !== false;
+    }
+
+    /**
+     * Whether an exception - a PDOException as the driver threw it, or one of
+     * these wrapping it - is a dropped connection rather than a bad query.
+     */
+    public static function causedByLostConnection(Throwable $e): bool
+    {
+        if ($e instanceof self) {
+            $e = $e->getPrevious() ?? $e;
+        }
+
+        $code = $e instanceof PDOException && is_array($e->errorInfo) ? ($e->errorInfo[1] ?? null) : null;
+
+        // Client side: 2006 the server has gone away, 2013 the connection was
+        // lost mid-query, 2002/2003 it could not be reached at all. Server
+        // side: 1053 it is shutting down, 1927 the connection was killed,
+        // 4031 it was idle for longer than the wait timeout.
+        if (in_array($code, [2002, 2003, 2006, 2013, 1053, 1077, 1927, 4031], true)) {
+            return true;
+        }
+
+        $message = $e->getMessage();
+
+        foreach (self::LOST_CONNECTION_MESSAGES as $needle) {
+            if (stripos($message, $needle) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     protected function formatMessage(string $sql, array $bindings, Throwable $previous): string

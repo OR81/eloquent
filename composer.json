@@ -1,7 +1,7 @@
 {
   "name": "or81/eloquent",
   "description": "A lightweight, dependency-free ORM and SQL query builder for PHP with a Laravel-style fluent API. Supports MySQL and SQLite, reads its credentials from .env, and queries by Jalali (Shamsi) date out of the box.",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "keywords": ["database", "orm", "query-builder", "model", "sql", "mysql", "sqlite", "jalali", "shamsi", "persian-date", "dotenv"],
   "type": "library",
   "license": "MIT",

@@ -125,6 +125,75 @@ NDB::table('events')->getConnection();
 
 Only the default connection falls back to the unprefixed `DB_*` keys, so a typo in a connection name fails loudly instead of quietly pointing at the main database.
 
+### Long-running scripts
+
+MySQL closes a connection that has been idle longer than `wait_timeout` (eight
+hours by default, but often minutes on shared hosting). The client only finds
+out on the next statement, which fails with **`SQLSTATE[HY000]: General error:
+2006 MySQL server has gone away`**. An importer that spends a while on an API
+call, a file, or a sleep between rounds runs into this.
+
+Nothing has to be done about it: when a statement dies with the connection, it
+is run once more on a fresh one.
+
+```php
+foreach ($students as $student) {
+    sleep(60);                                  // the connection times out here
+
+    NDB::table('vadana')->upsert($student, ['national_code']);   // reconnects and goes on
+}
+```
+
+The retry is deliberately narrow, because repeating a statement is only safe
+when it never reached the server:
+
+- Only a dropped connection is retried - 2006, 2013, a killed or shut-down
+  connection, a broken pipe. A duplicate key or a bad column is thrown at once.
+- Only once. A second drop in a row is thrown, rather than looping against a
+  server that is down.
+- Never inside a transaction. Everything the transaction had done is already
+  gone, so replaying one statement would write it on top of nothing. The
+  `QueryException` is thrown instead, with the transaction level reset so the
+  `rollBack()` in your catch block does not fail on top of it.
+- Never on a PDO you handed over with `setPdo()`.
+
+To turn it off and see every drop yourself:
+
+```php
+NDB::configure(['reconnect' => false]);         // or DB_RECONNECT=false in .env
+```
+
+Either way, `isLostConnection()` tells a dropped connection from a bad query:
+
+```php
+try {
+    NDB::table('vadana')->upsert($rows, ['national_code']);
+} catch (QueryException $e) {
+    if ($e->isLostConnection()) {
+        // the retry did not get through either: the server is down or restarting
+    }
+}
+```
+
+Before a batch that follows a long quiet stretch you can check the connection
+first, so the work does not start on a dead one:
+
+```php
+while ($job = $queue->next()) {          // may block for minutes
+    NDB::ping();                         // reconnects if the server dropped us
+
+    NDB::table('jobs')->insert($job);
+}
+```
+
+`ping()` returns `false` when the server cannot be reached at all, and when a
+transaction is open - reconnecting there would throw the transaction away
+silently.
+
+A "gone away" that arrives *immediately*, on a connection that was busy the
+whole time, is usually a different problem: a single statement larger than the
+server's `max_allowed_packet`. Insert in smaller chunks, or raise the setting.
+
 ### An existing PDO instance
 
 ```php
@@ -143,6 +212,8 @@ NDB::setDefaultConnection('reporting');
 NDB::getDefaultConnection();
 NDB::purge('reporting');           // drop the connection, keep its config
 NDB::forget('reporting');          // drop both, so .env is read again
+NDB::reconnect();                  // close it and open a new one now
+NDB::ping();                       // is the server still there? reconnects if not
 ```
 
 ## Getting a builder
@@ -1120,6 +1191,10 @@ $e->getDriverCode();   // 1062 on MySQL, 19 on SQLite
 $e->getErrorInfo();    // ['23000', 1062, 'Duplicate entry ...']
 ```
 
+`isLostConnection()` is the third of them: it says the server was gone rather
+than the statement wrong. See [long-running scripts](#long-running-scripts) for
+what the connection does about that on its own.
+
 ### Better still, do not collide
 
 Catching a duplicate to then update is a race: another process can insert the same row between your `insert` and your `update`. `upsert()` settles it in one atomic statement, and the [worked example below](#insert-or-fill-in-only-the-blanks) shows the fill-in-the-blanks version.
@@ -1597,6 +1672,7 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `conflict_test` | telling one failure from another, and insert-or-fill-blanks |
 | `batch_upsert_test` | many rows per statement, each judged on its own values |
 | `streaming_test` | reading a large result set without holding it all at once |
+| `reconnect_test` | dropped connections: when a statement is retried, and when it is not |
 | `examples_test` | the worked examples in this file |
 
 ## Classes
@@ -1611,7 +1687,7 @@ Every suite uses an in-memory SQLite database and runs in its own process, so no
 | `JoinClause` | The `ON` clause of a join; a `Builder` with `on()` / `orOn()` |
 | `Jalali` | An immutable Jalali date, plus the calendar maths and storage detection |
 | `Grammar` | Compiles a builder into SQL for the active driver |
-| `Connection` | PDO wrapper: lazy connect, bindings, transactions, query log |
+| `Connection` | PDO wrapper: lazy connect, bindings, transactions, reconnects, query log |
 | `Env` | Reads `.env`, with phpdotenv when it is installed |
 | `Str` | The name conversions behind table and accessor resolution |
 | `Expression` | A raw SQL fragment |

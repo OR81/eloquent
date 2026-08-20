@@ -22,6 +22,12 @@ class Connection
     protected bool $logging = false;
     protected array $queryLog = [];
 
+    /** Whether the PDO instance came from setPdo(), so we may not replace it. */
+    protected bool $injectedPdo = false;
+
+    /** The buffering the last cursor() asked for, re-applied on reconnect. */
+    protected ?bool $bufferedQueries = null;
+
     public function __construct(array $config = [])
     {
         $this->config = array_merge([
@@ -34,6 +40,7 @@ class Connection
             'password' => '',
             'charset' => 'utf8mb4',
             'collation' => 'utf8mb4_unicode_ci',
+            'reconnect' => true,
             'options' => [],
         ], $config);
 
@@ -70,10 +77,15 @@ class Connection
 
     /**
      * Use an already-established PDO instance instead of connecting.
+     *
+     * A connection never replaces a PDO it was handed, so a dropped one is
+     * reported rather than reconnected behind your back.
      */
     public function setPdo(PDO $pdo): self
     {
         $this->pdo = $pdo;
+        $this->injectedPdo = true;
+        $this->transactions = 0;
 
         return $this;
     }
@@ -81,7 +93,52 @@ class Connection
     public function disconnect(): void
     {
         $this->pdo = null;
+        $this->injectedPdo = false;
         $this->transactions = 0;
+    }
+
+    /**
+     * Throw the current connection away and open a new one from the config.
+     *
+     * Any open transaction goes with it, so this does not belong inside one.
+     */
+    public function reconnect(): PDO
+    {
+        $this->disconnect();
+
+        return $this->getPdo();
+    }
+
+    /**
+     * Whether the server is still there, reconnecting if it is not.
+     *
+     * Worth calling in a long-running script before a round of work that
+     * follows a long idle stretch - a worker waking up, a slow API call
+     * between batches - since MySQL closes an idle connection after
+     * wait_timeout and only says so on the next statement.
+     *
+     * False means the server could not be reached, or that a transaction is
+     * open and reconnecting would have discarded it.
+     */
+    public function ping(): bool
+    {
+        try {
+            $this->getPdo()->query('select 1');
+
+            return true;
+        } catch (Throwable $e) {
+            if ($this->transactions > 0 || $this->injectedPdo || ! QueryException::causedByLostConnection($e)) {
+                return false;
+            }
+        }
+
+        try {
+            $this->reconnect()->query('select 1');
+
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
     }
 
     /* ------------------------------------------------------------------
@@ -119,7 +176,7 @@ class Connection
         if ($unbuffered) {
             $previous = $this->getPdo()->getAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY);
 
-            $this->getPdo()->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+            $this->useBufferedQueries(false);
         }
 
         try {
@@ -130,9 +187,20 @@ class Connection
             }
         } finally {
             if ($unbuffered) {
-                $this->getPdo()->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, $previous ?? true);
+                $this->useBufferedQueries($previous ?? true);
             }
         }
+    }
+
+    /**
+     * Turn MySQL's result buffering on or off, remembering the choice so that
+     * a reconnect part way through does not quietly restore buffering.
+     */
+    protected function useBufferedQueries(bool $buffered): void
+    {
+        $this->bufferedQueries = $buffered;
+
+        $this->getPdo()->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, $buffered);
     }
 
     /**
@@ -179,7 +247,13 @@ class Connection
         try {
             return $this->getPdo()->exec($query) !== false;
         } catch (PDOException $e) {
-            throw new QueryException($query, [], $e);
+            $this->handleLostConnection($e, $query, []);
+
+            try {
+                return $this->getPdo()->exec($query) !== false;
+            } catch (PDOException $again) {
+                throw new QueryException($query, [], $again);
+            }
         }
     }
 
@@ -193,13 +267,17 @@ class Connection
         $start = microtime(true);
 
         try {
-            $statement = $this->getPdo()->prepare($query);
-
-            $this->bindValues($statement, $bindings);
-
-            $statement->execute();
+            $statement = $this->execute($query, $bindings);
         } catch (PDOException $e) {
-            throw new QueryException($query, $bindings, $e);
+            // A dropped connection is retried once on a fresh one; anything
+            // else comes straight back out as a QueryException.
+            $this->handleLostConnection($e, $query, $bindings);
+
+            try {
+                $statement = $this->execute($query, $bindings);
+            } catch (PDOException $again) {
+                throw new QueryException($query, $bindings, $again);
+            }
         }
 
         if ($this->logging) {
@@ -211,6 +289,45 @@ class Connection
         }
 
         return $statement;
+    }
+
+    protected function execute(string $query, array $bindings): PDOStatement
+    {
+        $statement = $this->getPdo()->prepare($query);
+
+        $this->bindValues($statement, $bindings);
+
+        $statement->execute();
+
+        return $statement;
+    }
+
+    /**
+     * Decide what a failed statement means: return, and the caller may run it
+     * again on a new connection, or throw.
+     *
+     * A statement that died with the connection never reached the server, so
+     * running it a second time is safe. That stops being true once a
+     * transaction is open - the work it had done is already gone - so an
+     * interrupted transaction is always reported. Either way its counter is
+     * reset, so a rollBack() in the caller's catch block cannot throw a
+     * second exception on top of the first.
+     */
+    protected function handleLostConnection(PDOException $e, string $query, array $bindings): void
+    {
+        if (! QueryException::causedByLostConnection($e)) {
+            throw new QueryException($query, $bindings, $e);
+        }
+
+        $interrupted = $this->transactions > 0;
+
+        $this->transactions = 0;
+
+        if ($interrupted || $this->injectedPdo || ! $this->config['reconnect']) {
+            throw new QueryException($query, $bindings, $e);
+        }
+
+        $this->pdo = null;
     }
 
     protected function bindValues(PDOStatement $statement, array $bindings): void
@@ -263,7 +380,19 @@ class Connection
     public function beginTransaction(): void
     {
         if ($this->transactions === 0) {
-            $this->getPdo()->beginTransaction();
+            try {
+                $this->getPdo()->beginTransaction();
+            } catch (PDOException $e) {
+                // Nothing has been done inside the transaction yet, so a
+                // connection that had already died can still be replaced.
+                $this->handleLostConnection($e, '[beginning a transaction]', []);
+
+                try {
+                    $this->getPdo()->beginTransaction();
+                } catch (PDOException $again) {
+                    throw new QueryException('[beginning a transaction]', [], $again);
+                }
+            }
         } else {
             $this->getPdo()->exec('SAVEPOINT trans' . ($this->transactions + 1));
         }
@@ -349,6 +478,10 @@ class Connection
 
         if ($this->config['driver'] === 'sqlite') {
             $pdo->exec('PRAGMA foreign_keys = ON');
+        }
+
+        if ($this->bufferedQueries !== null && $this->unbufferedFetching()) {
+            $pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, $this->bufferedQueries);
         }
 
         return $pdo;
